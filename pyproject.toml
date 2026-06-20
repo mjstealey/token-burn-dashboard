@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "Self-hosted token-burn dashboard for Claude Code, Codex, and other AI coding tools"
 readme = "README.md"
 requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.34",

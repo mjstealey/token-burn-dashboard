@@ -7,6 +7,11 @@ out of the box (with a pluggable adapter interface for other tools), persists to
 lightweight local **DuckDB**, deploys via **docker compose**, and re-ingests
 incrementally on a schedule and on every run.
 
+The heat map renders as **per-provider panels plus a combined total** (e.g. Claude,
+Codex, and Combined), and each panel can be **toggled on/off** — the selection is
+remembered in your browser. Panels share a common date window and each is color-scaled
+to its own range so a quiet provider's pattern stays visible next to a busy one.
+
 The framing follows Nate B Jones's "token burn" idea: tokens are a proxy for
 *delegated intelligence*, and this is a learning loop — not a leaderboard.
 
@@ -110,6 +115,10 @@ The **↻ refresh** button triggers an immediate ingest; the page also polls eve
 `/api/projects` · `/api/sessions` · `/api/turns` · `/api/burn` · `/api/health` ·
 `POST /api/ingest`.
 
+`/api/heatmap` returns `{ metric, days, combined: [...], providers: { <provider>: [...] } }`
+(plus `series` as a back-compat alias for `combined`); each daily entry carries
+`cost`, `tokens`, and the `input`/`output`/`cache_read`/`cache_creation` breakdown.
+
 ---
 
 ## Offline use
@@ -127,3 +136,7 @@ src/token_dashboard/
   templates/{base,dashboard}.html   static/{app.js,styles.css}
 pricing.yaml  docker-compose.yml  Dockerfile  entrypoint.sh  tests/
 ```
+
+## License
+
+[MIT](LICENSE) © 2026 Michael J. Stealey

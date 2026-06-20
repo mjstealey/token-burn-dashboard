@@ -58,6 +58,8 @@ def test_endpoints_serve(tmp_path):
 
         hm = client.get("/api/heatmap?days=90&metric=cost").json()
         assert hm["metric"] == "cost"
+        assert "combined" in hm and "providers" in hm
+        assert "claude" in hm["providers"]  # only Claude was seeded
 
         assert client.get("/api/models").json()["models"]
         assert "block_5h" in client.get("/api/burn").json()

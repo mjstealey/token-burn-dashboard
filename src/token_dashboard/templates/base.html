@@ -4,6 +4,16 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Token Burn</title>
+  <!-- Set the theme before CSS applies so there's no flash of the wrong mode. -->
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem("td.theme") ||
+          (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+        document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    })();
+  </script>
   <link rel="stylesheet" href="/static/styles.css" />
   <!-- ECharts from CDN. For fully offline use, vendor echarts.min.js into static/ and
        point this <script> at /static/echarts.min.js (see README). -->

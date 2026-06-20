@@ -11,6 +11,19 @@
   font-synthesis: none;
 }
 
+:root[data-theme="dark"] {
+  --bg: #14151a;
+  --panel: #1c1e25;
+  --ink: #e9e7e2;
+  --muted: #9a978e;
+  --faint: #2a2d36;
+  --rule: #343845;
+  --accent: #5cb39b;
+  --accent-soft: #1d3a32;
+  --warn: #d6804f;
+  color-scheme: dark;
+}
+
 * { box-sizing: border-box; }
 
 body {
@@ -19,6 +32,7 @@ body {
   color: var(--ink);
   font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
+  transition: background-color 0.15s ease, color 0.15s ease;
 }
 
 main { max-width: 1100px; margin: 0 auto; padding: 28px 24px 64px; }
@@ -54,18 +68,39 @@ main { max-width: 1100px; margin: 0 auto; padding: 28px 24px 64px; }
 .kpi .small { color: var(--muted); font-size: 12.5px; margin-top: 2px; font-variant-numeric: tabular-nums; }
 
 /* Cards */
-.card { background: var(--panel); border: 1px solid var(--rule); border-radius: 12px; padding: 16px 18px; margin-bottom: 20px; }
+.card { background: var(--panel); border: 1px solid var(--rule); border-radius: 12px; padding: 16px 18px; margin-bottom: 20px; min-width: 0; }
 .card-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 10px; }
 .card-head h2 { font-size: 15px; font-weight: 650; margin: 0; letter-spacing: -0.01em; }
 .note { color: var(--muted); font-size: 12px; }
 .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
 
 .chart { width: 100%; }
-.heatmap-chart { height: 200px; }
+.heatmap-chart { height: 170px; }
 .line-chart { height: 120px; margin-top: 6px; }
 
+/* Per-provider heatmap panels + show/hide chips */
+.series-toggle { display: flex; gap: 8px; flex-wrap: wrap; margin: 2px 0 6px; }
+.series-toggle button {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid var(--rule); background: var(--panel); color: var(--muted);
+  padding: 5px 11px; border-radius: 999px; font-size: 12.5px; cursor: pointer;
+}
+.series-toggle button .dot { width: 9px; height: 9px; border-radius: 2px; background: var(--rule); }
+.series-toggle button.on { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+.series-toggle button.on .dot { background: var(--accent); }
+.series-toggle button[aria-pressed="false"] { opacity: 0.7; }
+
+.heatmap-panel { margin-top: 8px; }
+.heatmap-label {
+  display: flex; align-items: baseline; justify-content: space-between;
+  margin: 0 2px; font-size: 12.5px; color: var(--muted);
+}
+.heatmap-label .name { color: var(--ink); font-weight: 600; }
+.heatmap-label .panel-stat { font-variant-numeric: tabular-nums; }
+
 /* Tables */
-table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+#providers, #models, #projects, #sessions, #turns { overflow-x: auto; }
+table { width: 100%; min-width: max-content; border-collapse: collapse; font-variant-numeric: tabular-nums; }
 th, td { text-align: right; padding: 6px 8px; font-size: 13px; border-bottom: 1px solid var(--faint); }
 th:first-child, td:first-child { text-align: left; }
 th { color: var(--muted); font-weight: 600; font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.03em; }
@@ -84,9 +119,11 @@ td.dim { color: var(--muted); }
 .gauge > span { display: block; height: 100%; background: var(--accent); }
 .gauge > span.hot { background: var(--warn); }
 
+/* Layout only — provider pills are colored inline (JS) from each provider's hue so
+   they match that provider's heat map color. */
 .pill { font-size: 11px; padding: 1px 7px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); }
-.pill.openai { background: #ece8f7; color: #5a3fb0; }
-.pill.local { background: #efeae3; color: #7a6a4f; }
+
+:root[data-theme="dark"] tbody tr:hover { background: #21242c; }
 
 .foot { color: var(--muted); font-size: 12px; display: flex; flex-direction: column; gap: 4px; margin-top: 28px; }
 .foot code { background: var(--faint); padding: 1px 5px; border-radius: 4px; }
