@@ -7,11 +7,59 @@ let lineChart = null;
 let lastHeatmap = null; // last /api/heatmap payload, kept so toggles re-render without refetch
 let seriesEnabled = loadEnabledPanels(); // { key: bool } or null until first load fills it
 
-// Muted sequential ramp (light -> dark teal-green).
-const RAMP = ["#eef3f1", "#d6e6df", "#a9cfc2", "#6fae9b", "#3f8f78", "#226b58", "#0f4536"];
+// Distinct base hue per series so each provider — and the combined total — reads as
+// its own color. Ramps and chip colors are derived from these and adapt to the theme.
+const SERIES_HUE = { combined: 222, claude: 16, openai: 168, local: 38 }; // indigo / coral / teal / amber
+function hueFor(key) { return SERIES_HUE[key] ?? 205; }
 
-// Per-panel accent used on the toggle chip dot; combined keeps the primary accent.
-const SERIES_COLORS = { combined: "#226b58", claude: "#226b58", openai: "#5a3fb0", local: "#7a6a4f" };
+function currentTheme() {
+  return document.documentElement.getAttribute("data-theme") === "dark" ? "dark" : "light";
+}
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+// 7-stop sequential ramp for a series hue. Light mode runs pale -> deep; dark mode
+// runs dark -> bright so cells stay legible on either background.
+function rampFor(key) {
+  const h = hueFor(key);
+  const dark = currentTheme() === "dark";
+  const N = 7;
+  const stops = [];
+  for (let i = 0; i < N; i++) {
+    const t = i / (N - 1);
+    const L = dark ? 20 + t * 50 : 94 - t * 58;
+    const S = dark ? 38 + t * 42 : 32 + t * 43;
+    stops.push(`hsl(${h} ${S}% ${L}%)`);
+  }
+  return stops;
+}
+// Solid representative color for the toggle chip dot.
+function seriesColor(key) {
+  return `hsl(${hueFor(key)} 60% ${currentTheme() === "dark" ? 58 : 40}%)`;
+}
+
+// Light/dark theme. The initial attribute is set by an inline script in <head>
+// (so there's no flash); this syncs the button and persists changes.
+function applyTheme(theme) {
+  document.documentElement.setAttribute("data-theme", theme);
+  try { localStorage.setItem("td.theme", theme); } catch {}
+  const btn = document.getElementById("theme-toggle");
+  if (btn) {
+    btn.textContent = theme === "dark" ? "☀" : "☾";
+    btn.setAttribute("aria-label", theme === "dark" ? "Switch to light mode" : "Switch to dark mode");
+    btn.title = btn.getAttribute("aria-label");
+  }
+}
+function toggleTheme() {
+  applyTheme(currentTheme() === "dark" ? "light" : "dark");
+  // ECharts colors are baked at setOption time — re-render so they follow the theme.
+  if (lastHeatmap) {
+    renderSeriesToggle(lastHeatmap);
+    renderHeatmaps(lastHeatmap);
+    renderLine(lastHeatmap.combined || lastHeatmap.series || []);
+  }
+}
 function seriesLabel(key) {
   return key === "combined" ? "Combined"
     : key === "openai" ? "Codex"
@@ -98,14 +146,14 @@ function providerPill(p) {
 }
 
 /* ---------- heat map ---------- */
-function buckets(max) {
-  if (!(max > 0)) return [{ lte: 0, color: RAMP[0] }];
+function buckets(max, ramp) {
+  if (!(max > 0)) return [{ lte: 0, color: ramp[0] }];
   const th = [];
   let v = max;
-  for (let i = 0; i < RAMP.length - 1; i++) { th.unshift(v); v = v / 3; } // geometric (log-ish)
-  const pieces = [{ lt: th[0], color: RAMP[0] }];
-  for (let i = 0; i < th.length - 1; i++) pieces.push({ gte: th[i], lt: th[i + 1], color: RAMP[i + 1] });
-  pieces.push({ gte: th[th.length - 1], color: RAMP[RAMP.length - 1] });
+  for (let i = 0; i < ramp.length - 1; i++) { th.unshift(v); v = v / 3; } // geometric (log-ish)
+  const pieces = [{ lt: th[0], color: ramp[0] }];
+  for (let i = 0; i < th.length - 1; i++) pieces.push({ gte: th[i], lt: th[i + 1], color: ramp[i + 1] });
+  pieces.push({ gte: th[th.length - 1], color: ramp[ramp.length - 1] });
   return pieces;
 }
 
@@ -133,8 +181,7 @@ function renderSeriesToggle(data) {
   const host = document.getElementById("series-toggle");
   host.innerHTML = keys.map((k) => {
     const on = seriesEnabled[k] !== false;
-    const color = SERIES_COLORS[k] || "#226b58";
-    const dot = on ? ` style="background:${color}"` : "";
+    const dot = on ? ` style="background:${seriesColor(k)}"` : "";
     return `<button data-key="${k}" class="${on ? "on" : ""}" aria-pressed="${on}">` +
       `<span class="dot"${dot}></span>${seriesLabel(k)}</button>`;
   }).join("");
@@ -218,28 +265,31 @@ function renderHeatmapInto(key, series) {
   const lastDay = all[all.length - 1].day;
   const start = dateAdd(lastDay, -(state.days - 1));
 
+  const ink = cssVar("--ink"), muted = cssVar("--muted"), panel = cssVar("--panel"),
+    rule = cssVar("--rule"), faint = cssVar("--faint"), bg = cssVar("--bg");
+
   chart.setOption({
     tooltip: {
-      borderColor: "#ddd9d0",
-      backgroundColor: "#fff",
-      textStyle: { color: "#1b1b1a", fontSize: 12 },
+      borderColor: rule,
+      backgroundColor: panel,
+      textStyle: { color: ink, fontSize: 12 },
       formatter: (p) => {
         const d = p.data.raw;
         return `<b>${d.day}</b><br/>` +
           `${fmtMoney(d.cost)} · ${fmtTokens(d.tokens)} tok<br/>` +
-          `<span style="color:#6f6c66">in ${fmtTokens(d.input)} · out ${fmtTokens(d.output)} · ` +
+          `<span style="color:${muted}">in ${fmtTokens(d.input)} · out ${fmtTokens(d.output)} · ` +
           `cache rd ${fmtTokens(d.cache_read)} · cache wr ${fmtTokens(d.cache_creation)}</span>`;
       },
     },
     visualMap: {
       type: "piecewise",
-      pieces: buckets(maxV),
+      pieces: buckets(maxV, rampFor(key)),
       orient: "horizontal",
       left: "center",
       bottom: 0,
       itemWidth: 12,
       itemHeight: 12,
-      textStyle: { color: "#6f6c66", fontSize: 10 },
+      textStyle: { color: muted, fontSize: 10 },
       formatter: (a, b) => {
         const f = state.metric === "cost" ? (x) => fmtMoney(x) : (x) => fmtTokens(x);
         if (a === -Infinity || a == null) return "< " + f(b);
@@ -255,10 +305,10 @@ function renderHeatmapInto(key, series) {
       cellSize: ["auto", 13],
       range: [start, lastDay],
       splitLine: { show: false },
-      itemStyle: { color: "#f3f1ec", borderColor: "#faf9f7", borderWidth: 2 },
+      itemStyle: { color: faint, borderColor: bg, borderWidth: 2 },
       yearLabel: { show: false },
-      monthLabel: { color: "#6f6c66", fontSize: 11 },
-      dayLabel: { color: "#b6b2a8", fontSize: 10, firstDay: 0 },
+      monthLabel: { color: muted, fontSize: 11 },
+      dayLabel: { color: muted, fontSize: 10, firstDay: 0 },
     },
     series: [{ type: "heatmap", coordinateSystem: "calendar", data: cells }],
   }, true);
@@ -278,28 +328,32 @@ function renderLine(series) {
     return w.reduce((a, b) => a + b, 0) / w.length;
   });
 
+  const ink = cssVar("--ink"), muted = cssVar("--muted"), panel = cssVar("--panel"),
+    rule = cssVar("--rule"), faint = cssVar("--faint");
+  const ramp = rampFor("combined");
+
   lineChart.setOption({
     grid: { top: 18, left: 48, right: 12, bottom: 22 },
     tooltip: {
-      trigger: "axis", backgroundColor: "#fff", borderColor: "#ddd9d0",
-      textStyle: { color: "#1b1b1a", fontSize: 12 },
+      trigger: "axis", backgroundColor: panel, borderColor: rule,
+      textStyle: { color: ink, fontSize: 12 },
       valueFormatter: (v) => fmtMetric(v),
     },
     xAxis: {
       type: "category", data: days, boundaryGap: false,
-      axisLine: { lineStyle: { color: "#ddd9d0" } },
-      axisLabel: { color: "#6f6c66", fontSize: 10 },
+      axisLine: { lineStyle: { color: rule } },
+      axisLabel: { color: muted, fontSize: 10 },
       axisTick: { show: false },
     },
     yAxis: {
       type: "value",
-      splitLine: { lineStyle: { color: "#efece6" } },
-      axisLabel: { color: "#6f6c66", fontSize: 10, formatter: (v) => fmtMetric(v) },
+      splitLine: { lineStyle: { color: faint } },
+      axisLabel: { color: muted, fontSize: 10, formatter: (v) => fmtMetric(v) },
     },
     series: [
-      { name: "daily", type: "bar", data: vals, itemStyle: { color: "#cfe2da" }, barMaxWidth: 6 },
+      { name: "daily", type: "bar", data: vals, itemStyle: { color: ramp[2] }, barMaxWidth: 6 },
       { name: "7-day avg", type: "line", data: ma, smooth: true, symbol: "none",
-        lineStyle: { color: "#226b58", width: 2 } },
+        lineStyle: { color: ramp[5], width: 2 } },
     ],
   }, true);
 }
@@ -423,6 +477,8 @@ function wireToggle(id, key, cast) {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
+  applyTheme(currentTheme()); // sync the toggle button to the attribute set in <head>
+  document.getElementById("theme-toggle").addEventListener("click", toggleTheme);
   wireToggle("metric-toggle", "metric", (v) => v);
   wireToggle("range-toggle", "days", (v) => parseInt(v, 10));
   document.getElementById("refresh").addEventListener("click", async (e) => {
