@@ -118,13 +118,10 @@ td.dim { color: var(--muted); }
 .gauge > span { display: block; height: 100%; background: var(--accent); }
 .gauge > span.hot { background: var(--warn); }
 
+/* Layout only — provider pills are colored inline (JS) from each provider's hue so
+   they match that provider's heat map color. */
 .pill { font-size: 11px; padding: 1px 7px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); }
-.pill.openai { background: #ece8f7; color: #5a3fb0; }
-.pill.local { background: #efeae3; color: #7a6a4f; }
 
-:root[data-theme="dark"] .pill { background: #1d3a32; color: #82d2bc; }
-:root[data-theme="dark"] .pill.openai { background: #262040; color: #b9a8ee; }
-:root[data-theme="dark"] .pill.local { background: #322f1f; color: #d2bd8c; }
 :root[data-theme="dark"] tbody tr:hover { background: #21242c; }
 
 .foot { color: var(--muted); font-size: 12px; display: flex; flex-direction: column; gap: 4px; margin-top: 28px; }

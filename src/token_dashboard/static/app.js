@@ -53,12 +53,9 @@ function applyTheme(theme) {
 }
 function toggleTheme() {
   applyTheme(currentTheme() === "dark" ? "light" : "dark");
-  // ECharts colors are baked at setOption time — re-render so they follow the theme.
-  if (lastHeatmap) {
-    renderSeriesToggle(lastHeatmap);
-    renderHeatmaps(lastHeatmap);
-    renderLine(lastHeatmap.combined || lastHeatmap.series || []);
-  }
+  // Colors (chart ramps, provider pills, cache bars) are baked at render time, so
+  // re-render everything to follow the new theme.
+  loadAll();
 }
 function seriesLabel(key) {
   return key === "combined" ? "Combined"
@@ -139,10 +136,18 @@ async function loadSummary() {
     "Sources: ~/.claude (Claude Code), ~/.codex (Codex). Read-only.";
 }
 
+// Soft background + readable foreground for a provider, from its series hue, so the
+// pill matches that provider's heat map color (and adapts to the theme).
+function providerColors(p) {
+  const h = hueFor(p);
+  return currentTheme() === "dark"
+    ? { fg: `hsl(${h} 65% 70%)`, bg: `hsl(${h} 38% 18%)` }
+    : { fg: `hsl(${h} 60% 32%)`, bg: `hsl(${h} 68% 93%)` };
+}
 function providerPill(p) {
-  const cls = p === "openai" ? "openai" : p === "local" ? "local" : "";
-  const name = p === "openai" ? "Codex" : p === "claude" ? "Claude" : p;
-  return `<span class="pill ${cls}">${name}</span>`;
+  const name = p === "openai" ? "Codex" : p === "claude" ? "Claude" : p === "local" ? "Local" : p;
+  const c = providerColors(p);
+  return `<span class="pill" style="background:${c.bg};color:${c.fg}">${name}</span>`;
 }
 
 /* ---------- heat map ---------- */
@@ -396,9 +401,10 @@ function table(headers, rows) {
   const body = rows.map((r) => "<tr>" + r.map((c) => `<td>${c}</td>`).join("") + "</tr>").join("");
   return `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
 }
-function miniBar(frac) {
+function miniBar(frac, color) {
   const w = Math.round(80 * Math.min(1, Math.max(0, frac)));
-  return `<span class="bartrack"><span class="bar" style="width:${w}px"></span></span>`;
+  const style = color ? `width:${w}px;background:${color}` : `width:${w}px`;
+  return `<span class="bartrack"><span class="bar" style="${style}"></span></span>`;
 }
 
 async function loadModels() {
@@ -410,7 +416,7 @@ async function loadModels() {
     return [
       providerPill(m.provider) + " <span class='mono'>" + (m.model || "(unknown)") + "</span>",
       fmtTokens(m.tokens), fmtMoney(m.cost),
-      miniBar(eff) + " " + pct(eff), (m.events || 0).toLocaleString(),
+      miniBar(eff, seriesColor(m.provider)) + " " + pct(eff), (m.events || 0).toLocaleString(),
     ];
   });
   document.getElementById("models").innerHTML =
