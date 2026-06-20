@@ -24,6 +24,7 @@ token-dashboard = "token_dashboard.cli:main"
 dev = [
     "pytest>=8.0",
     "httpx>=0.27",
+    "playwright>=1.60.0",
 ]
 
 [build-system]
