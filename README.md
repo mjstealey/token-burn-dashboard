@@ -136,3 +136,7 @@ src/token_dashboard/
   templates/{base,dashboard}.html   static/{app.js,styles.css}
 pricing.yaml  docker-compose.yml  Dockerfile  entrypoint.sh  tests/
 ```
+
+## License
+
+[MIT](LICENSE) © 2026 Michael J. Stealey
