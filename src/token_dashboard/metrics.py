@@ -59,10 +59,19 @@ def summary(db: Database, tz: str) -> dict:
     }
 
 
+_DAY_FIELDS = ("cost", "tokens", "input", "output", "cache_read", "cache_creation")
+
+
 def heatmap(db: Database, tz: str, days: int = 365, metric: str = "cost") -> dict:
+    """Daily series bucketed by local day, split per provider plus a combined total.
+
+    Returns ``combined`` (all providers summed per day) and ``providers`` (a map of
+    provider -> daily series). ``series`` is kept as an alias for ``combined`` for
+    backwards compatibility.
+    """
     rows = db.query_dicts(
         f"""
-        SELECT CAST(ts AT TIME ZONE ? AS DATE) AS day,
+        SELECT CAST(ts AT TIME ZONE ? AS DATE) AS day, provider,
                COALESCE(SUM(cost_usd),0) AS cost,
                COALESCE(SUM({TOK}),0) AS tokens,
                COALESCE(SUM(input_tokens),0) AS input,
@@ -71,13 +80,33 @@ def heatmap(db: Database, tz: str, days: int = 365, metric: str = "cost") -> dic
                COALESCE(SUM(cache_creation_tokens),0) AS cache_creation
         FROM usage_events
         WHERE ts >= now() - (CAST(? AS INTEGER) * INTERVAL '1 day')
-        GROUP BY day ORDER BY day
+        GROUP BY day, provider ORDER BY day
         """,
         [tz, days],
     )
+
+    providers: dict[str, list[dict]] = {}
+    combined: dict[str, dict] = {}
     for r in rows:
-        r["day"] = r["day"].isoformat() if r["day"] else None
-    return {"metric": metric, "days": days, "series": rows}
+        day = r["day"].isoformat() if r["day"] else None
+        if day is None:
+            continue
+        prov = r["provider"]
+        entry = {"day": day, **{f: r[f] for f in _DAY_FIELDS}}
+        providers.setdefault(prov, []).append(entry)
+
+        agg = combined.setdefault(day, {"day": day, **{f: 0 for f in _DAY_FIELDS}})
+        for f in _DAY_FIELDS:
+            agg[f] += r[f]
+
+    combined_series = [combined[d] for d in sorted(combined)]
+    return {
+        "metric": metric,
+        "days": days,
+        "combined": combined_series,
+        "providers": providers,
+        "series": combined_series,  # back-compat alias
+    }
 
 
 def by_model(db: Database) -> list[dict]:

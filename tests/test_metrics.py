@@ -93,9 +93,26 @@ def test_by_model_groups_both_providers(tmp_path, db, pricing):
 def test_heatmap_buckets_by_day(tmp_path, db, pricing):
     _seed(tmp_path, db, pricing)
     hm = metrics.heatmap(db, TZ, days=365)
-    assert hm["series"], "expected at least one day"
-    for row in hm["series"]:
+    assert hm["combined"], "expected at least one day"
+    assert hm["series"] == hm["combined"]  # back-compat alias
+    for row in hm["combined"]:
         assert isinstance(row["day"], str) and len(row["day"]) == 10
+
+
+def test_heatmap_splits_by_provider(tmp_path, db, pricing):
+    _seed(tmp_path, db, pricing)
+    hm = metrics.heatmap(db, TZ, days=365)
+    # One claude event + one codex event were seeded.
+    assert set(hm["providers"]) == {"claude", "openai"}
+
+    # Combined per-day totals must equal the sum across providers for that day.
+    per_day_provider = {}
+    for prov, series in hm["providers"].items():
+        for row in series:
+            per_day_provider.setdefault(row["day"], 0)
+            per_day_provider[row["day"]] += row["tokens"]
+    for row in hm["combined"]:
+        assert row["tokens"] == per_day_provider[row["day"]]
 
 
 def test_top_turns_sorted_desc(tmp_path, db, pricing):

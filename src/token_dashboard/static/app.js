@@ -2,11 +2,28 @@
    calendar heat map plus supporting breakdowns. No build step. */
 
 const state = { metric: "cost", days: 365 };
-let heatmapChart = null;
+const heatmapCharts = {}; // panel key ("combined"|"claude"|"openai"...) -> ECharts instance
 let lineChart = null;
+let lastHeatmap = null; // last /api/heatmap payload, kept so toggles re-render without refetch
+let seriesEnabled = loadEnabledPanels(); // { key: bool } or null until first load fills it
 
 // Muted sequential ramp (light -> dark teal-green).
 const RAMP = ["#eef3f1", "#d6e6df", "#a9cfc2", "#6fae9b", "#3f8f78", "#226b58", "#0f4536"];
+
+// Per-panel accent used on the toggle chip dot; combined keeps the primary accent.
+const SERIES_COLORS = { combined: "#226b58", claude: "#226b58", openai: "#5a3fb0", local: "#7a6a4f" };
+function seriesLabel(key) {
+  return key === "combined" ? "Combined"
+    : key === "openai" ? "Codex"
+    : key === "claude" ? "Claude"
+    : key;
+}
+function loadEnabledPanels() {
+  try { return JSON.parse(localStorage.getItem("td.heatmaps") || "null"); } catch { return null; }
+}
+function saveEnabledPanels() {
+  try { localStorage.setItem("td.heatmaps", JSON.stringify(seriesEnabled || {})); } catch {}
+}
 
 /* ---------- formatting ---------- */
 function fmtMoney(v) {
@@ -94,27 +111,114 @@ function buckets(max) {
 
 async function loadHeatmap() {
   const data = await getJSON(`/api/heatmap?days=${state.days}&metric=${state.metric}`);
-  const series = data.series || [];
+  lastHeatmap = data;
   document.getElementById("heatmap-note").textContent =
-    `color = daily ${state.metric === "cost" ? "$" : "tokens"} · log-spaced · hover for detail`;
-  renderHeatmap(series);
-  renderLine(series);
+    `color = daily ${state.metric === "cost" ? "$" : "tokens"} · each panel scaled to its own range · hover for detail`;
+  renderSeriesToggle(data);
+  renderHeatmaps(data);
+  renderLine(data.combined || data.series || []);
 }
 
-function renderHeatmap(series) {
-  const el = document.getElementById("heatmap");
-  if (!heatmapChart) heatmapChart = echarts.init(el, null, { renderer: "canvas" });
-  if (!series.length) {
-    heatmapChart.clear();
-    el.innerHTML = "";
+// "combined" first, then each provider alphabetically.
+function orderedKeys(data) {
+  return ["combined", ...Object.keys(data.providers || {}).sort()];
+}
+
+function renderSeriesToggle(data) {
+  const keys = orderedKeys(data);
+  if (!seriesEnabled) seriesEnabled = {};
+  // Default newly-seen panels to on.
+  keys.forEach((k) => { if (!(k in seriesEnabled)) seriesEnabled[k] = true; });
+
+  const host = document.getElementById("series-toggle");
+  host.innerHTML = keys.map((k) => {
+    const on = seriesEnabled[k] !== false;
+    const color = SERIES_COLORS[k] || "#226b58";
+    const dot = on ? ` style="background:${color}"` : "";
+    return `<button data-key="${k}" class="${on ? "on" : ""}" aria-pressed="${on}">` +
+      `<span class="dot"${dot}></span>${seriesLabel(k)}</button>`;
+  }).join("");
+
+  host.querySelectorAll("button").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const k = btn.dataset.key;
+      seriesEnabled[k] = !(seriesEnabled[k] !== false); // toggle
+      saveEnabledPanels();
+      renderSeriesToggle(lastHeatmap);
+      renderHeatmaps(lastHeatmap);
+    });
+  });
+}
+
+function renderHeatmaps(data) {
+  const keys = orderedKeys(data);
+  const host = document.getElementById("heatmaps");
+  const placeholder = host.querySelector(".empty");
+  if (placeholder) placeholder.remove();
+
+  // Tear down panels that are now disabled or gone.
+  Array.from(host.querySelectorAll(".heatmap-panel")).forEach((panel) => {
+    const k = panel.dataset.key;
+    if (!keys.includes(k) || seriesEnabled[k] === false) {
+      if (heatmapCharts[k]) { heatmapCharts[k].dispose(); delete heatmapCharts[k]; }
+      panel.remove();
+    }
+  });
+
+  const enabled = keys.filter((k) => seriesEnabled[k] !== false);
+  if (!enabled.length) {
+    host.innerHTML = `<p class="empty">No panels selected — pick one above.</p>`;
     return;
   }
+
+  // Create any missing panels, then re-append in order so layout is stable.
+  enabled.forEach((k) => {
+    let panel = host.querySelector(`.heatmap-panel[data-key="${k}"]`);
+    if (!panel) {
+      panel = document.createElement("div");
+      panel.className = "heatmap-panel";
+      panel.dataset.key = k;
+      panel.innerHTML =
+        `<div class="heatmap-label"><span class="name">${seriesLabel(k)}</span>` +
+        `<span class="note panel-stat" id="stat-${k}"></span></div>` +
+        `<div class="chart heatmap-chart" id="hm-${k}"></div>`;
+    }
+    host.appendChild(panel);
+  });
+
+  enabled.forEach((k) => {
+    const series = k === "combined" ? (data.combined || []) : ((data.providers || {})[k] || []);
+    renderHeatmapInto(k, series);
+  });
+}
+
+function renderHeatmapInto(key, series) {
+  const el = document.getElementById(`hm-${key}`);
+  if (!el) return;
+  let chart = heatmapCharts[key];
+  if (!chart) { chart = echarts.init(el, null, { renderer: "canvas" }); heatmapCharts[key] = chart; }
+
+  const statEl = document.getElementById(`stat-${key}`);
+  if (!series.length) {
+    chart.clear();
+    if (statEl) statEl.textContent = "no activity in range";
+    return;
+  }
+  if (statEl) {
+    const tCost = series.reduce((a, d) => a + (d.cost || 0), 0);
+    const tTok = series.reduce((a, d) => a + (d.tokens || 0), 0);
+    statEl.textContent = `${fmtMoney(tCost)} · ${fmtTokens(tTok)} tok`;
+  }
+
   const cells = series.map((d) => ({ value: [d.day, metricVal(d)], raw: d }));
   const maxV = Math.max(...series.map(metricVal));
-  const lastDay = series[series.length - 1].day;
+  // All panels share the same date window (combined's latest day) so they line up.
+  const all = (lastHeatmap && lastHeatmap.combined && lastHeatmap.combined.length)
+    ? lastHeatmap.combined : series;
+  const lastDay = all[all.length - 1].day;
   const start = dateAdd(lastDay, -(state.days - 1));
 
-  heatmapChart.setOption({
+  chart.setOption({
     tooltip: {
       borderColor: "#ddd9d0",
       backgroundColor: "#fff",
@@ -329,7 +433,7 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   loadAll();
   window.addEventListener("resize", () => {
-    if (heatmapChart) heatmapChart.resize();
+    Object.values(heatmapCharts).forEach((c) => c.resize());
     if (lineChart) lineChart.resize();
   });
   // Lightweight polling so the dashboard stays current while open.
