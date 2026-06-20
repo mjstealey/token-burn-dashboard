@@ -1,0 +1,18 @@
+# Optional YAML config. Environment variables (TD_*) override these.
+# Pass the path via TD_CONFIG=./config.yaml, or rely on .env alone.
+
+db_path: ./data/token.duckdb
+timezone: America/New_York
+pricing_path: ./pricing.yaml
+ingest_interval_min: 15
+port: 8080
+
+# Scan roots. Each entry maps a provider adapter to a filesystem root.
+scan_roots:
+  claude: ~/.claude/projects
+  codex: ~/.codex/sessions
+
+# Optional plan limits (tokens) for the utilization gauges. Omit to hide them.
+limits:
+  block_5h_tokens: null
+  week_tokens: null

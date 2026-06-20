@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block content %}
+<main>
+  <header class="topbar">
+    <div class="title">
+      <h1>Token&nbsp;Burn</h1>
+      <p class="sub">Delegated intelligence, traced from local logs.</p>
+    </div>
+    <div class="controls">
+      <div class="toggle" id="metric-toggle" role="group" aria-label="Metric">
+        <button data-metric="cost" class="on">$ cost</button>
+        <button data-metric="tokens">tokens</button>
+      </div>
+      <div class="toggle" id="range-toggle" role="group" aria-label="Range">
+        <button data-days="30">30d</button>
+        <button data-days="90">90d</button>
+        <button data-days="180">180d</button>
+        <button data-days="365" class="on">1y</button>
+      </div>
+      <button id="refresh" class="ghost" title="Re-ingest logs now">↻ refresh</button>
+    </div>
+  </header>
+
+  <p class="freshness" id="freshness">Loading…</p>
+
+  <section class="kpis" id="kpis"></section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>Daily burn</h2>
+      <span class="note" id="heatmap-note">color = daily $ · log-spaced</span>
+    </div>
+    <div id="heatmap" class="chart heatmap-chart"></div>
+    <div id="dailyline" class="chart line-chart"></div>
+  </section>
+
+  <section class="grid-2">
+    <div class="card">
+      <div class="card-head"><h2>Burn rate</h2><span class="note">trailing windows</span></div>
+      <div id="burn"></div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h2>Providers</h2><span class="note">all time</span></div>
+      <div id="providers"></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head"><h2>Models</h2><span class="note">$ and cache efficiency, all time</span></div>
+    <div id="models"></div>
+  </section>
+
+  <section class="grid-2">
+    <div class="card">
+      <div class="card-head"><h2>Projects</h2><span class="note">by directory</span></div>
+      <div id="projects"></div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h2>Top sessions</h2><span class="note">most expensive</span></div>
+      <div id="sessions"></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head"><h2>Most expensive requests</h2><span class="note">where the burn went</span></div>
+    <div id="turns"></div>
+  </section>
+
+  <footer class="foot">
+    <span>$ are notional, computed from <code>pricing.yaml</code> at published rates — not a bill.</span>
+    <span id="source-note"></span>
+  </footer>
+</main>
+{% endblock %}

@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Token Burn</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+  <!-- ECharts from CDN. For fully offline use, vendor echarts.min.js into static/ and
+       point this <script> at /static/echarts.min.js (see README). -->
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+</head>
+<body>
+  {% block content %}{% endblock %}
+  <script>
+    window.TD_CONFIG = {
+      timezone: {{ tz | tojson }},
+      hasLimits: {{ has_limits | tojson }}
+    };
+  </script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

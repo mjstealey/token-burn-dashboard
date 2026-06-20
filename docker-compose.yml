@@ -1,0 +1,26 @@
+services:
+  dashboard:
+    build: .
+    container_name: token-dashboard
+    ports:
+      # HOST_PORT (default 8080) -> container 8080
+      - "${HOST_PORT:-8080}:8080"
+    environment:
+      # Bucket the heatmap by your local day, not UTC.
+      TZ: "${TZ:-America/New_York}"
+      TD_INGEST_INTERVAL_MIN: "${TD_INGEST_INTERVAL_MIN:-15}"
+      # Log roots inside the container (see read-only mounts below).
+      TD_CLAUDE_ROOT: /data/claude/projects
+      TD_CODEX_ROOT: /data/codex/sessions
+      TD_DB_PATH: /app/data/token.duckdb
+      # Optional plan-limit gauges (tokens). Leave unset to hide them.
+      # TD_LIMIT_5H_TOKENS: "20000000"
+      # TD_LIMIT_WEEK_TOKENS: "500000000"
+    volumes:
+      # Host AI-tool logs, mounted READ-ONLY — the dashboard never writes here.
+      - "${HOME}/.claude:/data/claude:ro"
+      - "${HOME}/.codex:/data/codex:ro"
+      # Persistent DuckDB store + editable pricing.
+      - ./data:/app/data
+      - ./pricing.yaml:/app/pricing.yaml:ro
+    restart: unless-stopped
