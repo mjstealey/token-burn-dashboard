@@ -12,9 +12,10 @@ from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
 
 from . import metrics
-from .config import Config, load_config
+from .config import Config, load_config, validate_timezone
 from .db import Database
 from .ingest import ingest_all
+from .ingest.base import reprice_if_needed
 from .ingest.registry import adapters
 from .pricing import Pricing
 from .scheduler import start_scheduler
@@ -25,6 +26,7 @@ TEMPLATES = Jinja2Templates(directory=str(_PKG / "templates"))
 
 class AppState:
     def __init__(self, cfg: Config) -> None:
+        validate_timezone(cfg.timezone)
         self.cfg = cfg
         self.db = Database(cfg.db_path)
         self.pricing = Pricing.load(cfg.pricing_path)
@@ -33,8 +35,10 @@ class AppState:
         self.roots = {k: v for k, v in self.roots.items() if v is not None}
         self.last_ingest: dict | None = None
         self.last_ingest_at: dt.datetime | None = None
+        self.last_pricing_sync: dict | None = None
 
     def ingest(self) -> dict:
+        self.sync_pricing()
         summary = ingest_all(self.db, self.pricing, self.adapters, self.roots)
         self.last_ingest = summary
         self.last_ingest_at = dt.datetime.now(dt.timezone.utc)
@@ -42,6 +46,11 @@ class AppState:
 
     def reload_pricing(self) -> None:
         self.pricing = Pricing.load(self.cfg.pricing_path)
+
+    def sync_pricing(self, force: bool = False) -> dict:
+        self.reload_pricing()
+        self.last_pricing_sync = reprice_if_needed(self.db, self.pricing, force=force)
+        return self.last_pricing_sync
 
 
 def build_state(cfg: Config | None = None) -> AppState:
@@ -92,6 +101,7 @@ def create_app(state: AppState | None = None) -> FastAPI:
             "timezone": tz,
             "last_ingest_at": state.last_ingest_at,
             "last_ingest": state.last_ingest,
+            "last_pricing_sync": state.last_pricing_sync,
         }
 
     @app.get("/api/summary")
@@ -99,6 +109,7 @@ def create_app(state: AppState | None = None) -> FastAPI:
         s = metrics.summary(state.db, tz)
         s["last_ingest_at"] = state.last_ingest_at
         s["last_ingest"] = state.last_ingest
+        s["last_pricing_sync"] = state.last_pricing_sync
         s["timezone"] = tz
         return s
 
@@ -133,7 +144,16 @@ def create_app(state: AppState | None = None) -> FastAPI:
 
     @app.post("/api/ingest")
     def api_ingest():
-        return {"summary": state.ingest(), "at": state.last_ingest_at}
+        summary = state.ingest()
+        return {
+            "summary": summary,
+            "pricing": state.last_pricing_sync,
+            "at": state.last_ingest_at,
+        }
+
+    @app.post("/api/reprice")
+    def api_reprice(force: bool = False):
+        return {"pricing": state.sync_pricing(force=force)}
 
     return app
 

@@ -17,6 +17,7 @@ from ..db import Database
 from ..pricing import Pricing, UsageBreakdown
 
 _INGEST_LOCK = threading.Lock()
+_PRICING_HASH_KEY = "pricing_hash"
 
 
 @dataclass
@@ -102,23 +103,45 @@ _INSERT = (
 )
 
 
-def _pricing_key(ev: UsageEvent) -> str:
-    if ev.provider == "claude":
-        return "anthropic" if (ev.model or "").startswith("claude") else "local"
-    return ev.provider
+def _pricing_key(provider: str, model: str | None) -> str:
+    if provider == "claude":
+        return "anthropic" if (model or "").startswith("claude") else "local"
+    return provider
+
+
+def _cost_for_usage(
+    pricing: Pricing,
+    provider: str,
+    model: str | None,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int,
+    cache_create_5m: int,
+    cache_create_1h: int,
+) -> float:
+    return pricing.cost(
+        _pricing_key(provider, model),
+        model,
+        UsageBreakdown(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_read_tokens=cache_read_tokens,
+            cache_create_5m=cache_create_5m,
+            cache_create_1h=cache_create_1h,
+        ),
+    )
 
 
 def _row(ev: UsageEvent, pricing: Pricing, source_file: str) -> list:
-    cost = pricing.cost(
-        _pricing_key(ev),
+    cost = _cost_for_usage(
+        pricing,
+        ev.provider,
         ev.model,
-        UsageBreakdown(
-            input_tokens=ev.input_tokens,
-            output_tokens=ev.output_tokens,
-            cache_read_tokens=ev.cache_read_tokens,
-            cache_create_5m=ev.cache_create_5m,
-            cache_create_1h=ev.cache_create_1h,
-        ),
+        ev.input_tokens,
+        ev.output_tokens,
+        ev.cache_read_tokens,
+        ev.cache_create_5m,
+        ev.cache_create_1h,
     )
     return [
         ev.event_id,
@@ -151,6 +174,84 @@ def _file_state(db: Database, source_file: str) -> tuple[int, float, int] | None
         [source_file],
     )
     return rows[0] if rows else None
+
+
+def _metadata_value(db: Database, key: str) -> str | None:
+    row = db.con.execute("SELECT value FROM app_metadata WHERE key = ?", [key]).fetchone()
+    return row[0] if row else None
+
+
+def reprice_if_needed(db: Database, pricing: Pricing, force: bool = False) -> dict:
+    """Recompute stored costs only when the pricing file changed, unless forced."""
+    current_hash = pricing.source_hash
+    now = dt.datetime.now(dt.timezone.utc)
+
+    with db.lock:
+        previous_hash = _metadata_value(db, _PRICING_HASH_KEY)
+        changed = current_hash is not None and current_hash != previous_hash
+        if not force and not changed:
+            return {
+                "changed": False,
+                "repriced": 0,
+                "pricing_hash": current_hash,
+                "previous_pricing_hash": previous_hash,
+            }
+
+        rows = db.con.execute(
+            "SELECT event_id, provider, model, input_tokens, output_tokens, "
+            "cache_read_tokens, cache_create_5m, cache_create_1h FROM usage_events"
+        ).fetchall()
+        updates = [
+            (
+                _cost_for_usage(
+                    pricing,
+                    provider,
+                    model,
+                    int(input_tokens or 0),
+                    int(output_tokens or 0),
+                    int(cache_read_tokens or 0),
+                    int(cache_create_5m or 0),
+                    int(cache_create_1h or 0),
+                ),
+                event_id,
+            )
+            for (
+                event_id,
+                provider,
+                model,
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_create_5m,
+                cache_create_1h,
+            ) in rows
+        ]
+
+        db.con.execute("BEGIN TRANSACTION")
+        try:
+            if updates:
+                db.con.executemany(
+                    "UPDATE usage_events SET cost_usd = ? WHERE event_id = ?",
+                    updates,
+                )
+            if current_hash is not None:
+                db.con.execute(
+                    "INSERT INTO app_metadata (key, value, updated_at) "
+                    "VALUES (?, ?, ?) ON CONFLICT (key) DO UPDATE SET "
+                    "value = excluded.value, updated_at = excluded.updated_at",
+                    [_PRICING_HASH_KEY, current_hash, now],
+                )
+            db.con.execute("COMMIT")
+        except Exception:
+            db.con.execute("ROLLBACK")
+            raise
+
+    return {
+        "changed": changed,
+        "repriced": len(updates),
+        "pricing_hash": current_hash,
+        "previous_pricing_hash": previous_hash,
+    }
 
 
 def ingest_one(db: Database, pricing: Pricing, adapter: Adapter, path: Path) -> int:

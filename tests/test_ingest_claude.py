@@ -4,21 +4,36 @@ from token_dashboard.ingest.claude import ClaudeAdapter
 from conftest import write_jsonl
 
 
-def _assistant(request_id, uuid, usage, ts="2026-06-18T12:00:00.000Z"):
-    return {
+def _assistant(
+    request_id,
+    uuid,
+    usage,
+    ts="2026-06-18T12:00:00.000Z",
+    message_id="default",
+):
+    msg = {
+        "model": "claude-opus-4-8",
+        "usage": usage,
+    }
+    if message_id is None:
+        pass
+    elif message_id == "default":
+        msg["id"] = "msg_" + request_id
+    else:
+        msg["id"] = message_id
+
+    rec = {
         "type": "assistant",
         "uuid": uuid,
-        "requestId": request_id,
         "sessionId": "sess-1",
         "timestamp": ts,
         "cwd": "/proj",
         "gitBranch": "main",
-        "message": {
-            "model": "claude-opus-4-8",
-            "id": "msg_" + request_id,
-            "usage": usage,
-        },
+        "message": msg,
     }
+    if request_id is not None:
+        rec["requestId"] = request_id
+    return rec
 
 
 USAGE = {
@@ -55,6 +70,33 @@ def test_dedup_by_request_id(tmp_path, db, pricing):
     )
     assert rows[0][0] == 2000  # 2 * 1000, not 4 * 1000
     assert rows[0][1] == 16000  # 2 * 8000
+
+
+def test_dedup_by_message_id_when_request_id_missing(tmp_path, db, pricing):
+    f = tmp_path / "session.jsonl"
+    write_jsonl(
+        f,
+        [
+            _assistant(None, "uuid-1", USAGE, message_id="msg_shared"),
+            _assistant(None, "uuid-2", USAGE, message_id="msg_shared"),
+            _assistant(None, "uuid-3", USAGE, message_id="msg_shared"),
+        ],
+    )
+    assert ingest_one(db, pricing, ClaudeAdapter(), f) == 1
+    assert db.query("SELECT SUM(input_tokens) FROM usage_events")[0][0] == 1000
+
+
+def test_skips_uuid_only_usage_records(tmp_path, db, pricing):
+    f = tmp_path / "session.jsonl"
+    write_jsonl(
+        f,
+        [
+            _assistant(None, "uuid-1", USAGE, message_id=None),
+            _assistant(None, "uuid-2", USAGE, message_id=None),
+        ],
+    )
+    assert ingest_one(db, pricing, ClaudeAdapter(), f) == 0
+    assert db.query("SELECT COUNT(*) FROM usage_events")[0][0] == 0
 
 
 def test_idempotent_reingest(tmp_path, db, pricing):

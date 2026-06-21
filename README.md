@@ -54,6 +54,7 @@ Requires [`uv`](https://docs.astral.sh/uv/).
 uv run token-dashboard serve        # ingests on boot, serves on :8080
 # or run a one-off ingest:
 uv run token-dashboard ingest
+uv run token-dashboard reprice       # reprice stored costs if pricing.yaml changed
 uv run pytest                        # run the test suite
 ```
 
@@ -73,8 +74,8 @@ is a single new file under `src/token_dashboard/ingest/` plus an entry in
 ### Correctness notes (why the numbers are trustworthy)
 
 - **Claude dedup:** one API turn is split across several JSONL lines that each repeat
-  the *identical* usage payload. We collapse to one row per `requestId`, so totals
-  aren't multiplied 2–10×.
+  the *identical* usage payload. We collapse to one row per `requestId` (or stable
+  message id), so totals aren't multiplied 2–10×.
 - **Codex deltas:** `total_token_usage` is a running cumulative total — summing it
   squares the count. We sum the per-turn `last_token_usage` deltas instead.
 - **Cache pricing:** cache reads (~0.1×) and cache writes (1.25×/2×) are billed at
@@ -104,9 +105,11 @@ See `.env.example` and `config.example.yaml`.
 
 `pricing.yaml` holds USD-per-million-token rates per provider/model, with `input`,
 `cache_write_5m`, `cache_write_1h`, `cache_read`, and `output` tiers. **Re-verify
-against the vendor pricing pages periodically** — model lineups change. Editing the
-file and hitting **↻ refresh** (or restarting) recomputes new ingests; to recompute
-historical rows, delete `./data/token.duckdb` and re-ingest.
+against the vendor pricing pages periodically** — model lineups change. The app
+stores a content hash of `pricing.yaml`; editing the file and hitting **↻ refresh**
+(or restarting) reprices existing rows once and uses the new rates for new ingests.
+Use `uv run token-dashboard reprice --force` to recompute stored costs even when the
+file hash has not changed.
 
 ---
 
@@ -123,7 +126,7 @@ The **↻ refresh** button triggers an immediate ingest; the page also polls eve
 
 `GET /` · `/api/summary` · `/api/heatmap?days=&metric=` · `/api/models` ·
 `/api/projects` · `/api/sessions` · `/api/turns` · `/api/burn` · `/api/health` ·
-`POST /api/ingest`.
+`POST /api/ingest` · `POST /api/reprice?force=`.
 
 `/api/heatmap` returns `{ metric, days, combined: [...], providers: { <provider>: [...] } }`
 (plus `series` as a back-compat alias for `combined`); each daily entry carries

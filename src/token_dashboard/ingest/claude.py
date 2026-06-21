@@ -83,7 +83,9 @@ def _event_from_record(rec: dict) -> UsageEvent | None:
     except (ValueError, TypeError):
         return None
 
-    request_id = rec.get("requestId") or msg.get("id") or rec.get("uuid")
+    # `uuid` is per JSONL line, not per API request; using it here would inflate
+    # split assistant turns. Skip records without a stable request/message id.
+    request_id = rec.get("requestId") or msg.get("id")
     if not request_id:
         return None
 
