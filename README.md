@@ -19,6 +19,16 @@ The framing follows Nate B Jones's "token burn" idea: tokens are a proxy for
 > anywhere. Dollar figures are *notional* (token counts × published prices from
 > `pricing.yaml`), not a bill.
 
+## Screenshots
+
+Rendered from synthetic demo data (no real usage), in light and dark mode:
+
+| Light | Dark |
+| --- | --- |
+| ![Token Burn dashboard — light mode](docs/screenshot-light.png) | ![Token Burn dashboard — dark mode](docs/screenshot-dark.png) |
+
+Regenerate with `uv run python scripts/screenshot.py` (one-time: `uv run playwright install chromium`).
+
 ---
 
 ## Quick start (docker compose)
