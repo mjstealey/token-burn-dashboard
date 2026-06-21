@@ -9,6 +9,7 @@ burn number and one that's off by an order of magnitude.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -52,13 +53,15 @@ class UsageBreakdown:
 
 
 class Pricing:
-    def __init__(self, table: dict) -> None:
+    def __init__(self, table: dict, source_hash: str | None = None) -> None:
         self._table = table
+        self.source_hash = source_hash
 
     @classmethod
     def load(cls, path: str) -> "Pricing":
-        data = yaml.safe_load(Path(path).expanduser().read_text()) or {}
-        return cls(data)
+        raw = Path(path).expanduser().read_bytes()
+        data = yaml.safe_load(raw.decode("utf-8")) or {}
+        return cls(data, hashlib.sha256(raw).hexdigest())
 
     def rate(self, provider: str, model: str | None) -> Rate:
         prov = self._table.get(provider) or {}

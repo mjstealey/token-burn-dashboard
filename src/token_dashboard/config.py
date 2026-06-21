@@ -6,6 +6,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import pytz
 import yaml
 
 
@@ -28,6 +29,17 @@ def _int_or_none(v: str | None) -> int | None:
         return int(v)
     except ValueError:
         return None
+
+
+def validate_timezone(name: str) -> str:
+    try:
+        pytz.timezone(name)
+    except pytz.UnknownTimeZoneError as exc:
+        raise ValueError(
+            f"Unknown timezone {name!r}. Use an IANA timezone like "
+            "'America/New_York'."
+        ) from exc
+    return name
 
 
 @dataclass
@@ -97,4 +109,5 @@ def load_config() -> Config:
     if (v := _int_or_none(_env("TD_LIMIT_WEEK_TOKENS"))) is not None:
         cfg.limit_week_tokens = v
 
+    cfg.timezone = validate_timezone(cfg.timezone)
     return cfg

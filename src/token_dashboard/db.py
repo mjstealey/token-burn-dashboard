@@ -51,6 +51,12 @@ CREATE TABLE IF NOT EXISTS ingest_state (
     rows        BIGINT,
     updated_at  TIMESTAMPTZ
 );
+
+CREATE TABLE IF NOT EXISTS app_metadata (
+    key        VARCHAR PRIMARY KEY,
+    value      VARCHAR,
+    updated_at TIMESTAMPTZ
+);
 """
 
 
