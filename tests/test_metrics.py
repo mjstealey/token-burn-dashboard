@@ -1,4 +1,7 @@
-from token_dashboard.ingest.base import ingest_one
+import datetime as dt
+
+from token_dashboard.ingest.base import _INSERT, _row, ingest_one
+from token_dashboard.ingest.base import UsageEvent
 from token_dashboard.ingest.claude import ClaudeAdapter
 from token_dashboard.ingest.codex import CodexAdapter
 from token_dashboard import metrics
@@ -6,6 +9,19 @@ from token_dashboard import metrics
 from conftest import write_jsonl
 
 TZ = "America/New_York"
+
+
+def _insert_event(db, pricing, **kw):
+    """Insert one synthetic usage event directly (bypasses file parsing)."""
+    defaults = dict(
+        event_id=kw.get("event_id", "t:1"),
+        provider="claude",
+        tool="claude-code",
+        ts=dt.datetime.now(dt.timezone.utc),
+    )
+    ev = UsageEvent(**{**defaults, **kw})
+    with db.lock:
+        db.con.execute(_INSERT, _row(ev, pricing, "test"))
 
 
 def _seed(tmp_path, db, pricing):
@@ -82,12 +98,100 @@ def test_summary_all_time(tmp_path, db, pricing):
     assert len(s["providers"]) == 2
 
 
+def test_summary_includes_prev_windows(tmp_path, db, pricing):
+    _seed(tmp_path, db, pricing)
+    s = metrics.summary(db, TZ)
+    assert "prev_7d" in s and "prev_30d" in s
+    assert {"tokens", "cost", "events"} <= set(s["prev_7d"])
+
+
 def test_by_model_groups_both_providers(tmp_path, db, pricing):
     _seed(tmp_path, db, pricing)
-    models = metrics.by_model(db)
+    models = metrics.by_model(db, TZ)
     names = {m["model"] for m in models}
     assert "claude-opus-4-8" in names
     assert "gpt-5.3-codex" in names
+    assert all("reasoning" in m for m in models)
+
+
+def test_range_scoping_uses_local_days(db, pricing):
+    now = dt.datetime.now(dt.timezone.utc)
+    _insert_event(
+        db,
+        pricing,
+        event_id="t:new",
+        model="claude-opus-4-8",
+        input_tokens=100,
+        output_tokens=10,
+        ts=now - dt.timedelta(days=1),
+    )
+    _insert_event(
+        db,
+        pricing,
+        event_id="t:old",
+        provider="openai",
+        tool="codex-cli",
+        model="gpt-5.3-codex",
+        input_tokens=100,
+        output_tokens=10,
+        ts=now - dt.timedelta(days=40),
+    )
+    all_time = {m["model"] for m in metrics.by_model(db, TZ)}
+    assert all_time == {"claude-opus-4-8", "gpt-5.3-codex"}
+    recent = {m["model"] for m in metrics.by_model(db, TZ, days=7)}
+    assert recent == {"claude-opus-4-8"}
+    # Same scoping applies across the table queries.
+    assert len(metrics.top_turns(db, TZ, days=7)) == 1
+    assert len(metrics.top_turns(db, TZ)) == 2
+
+
+def test_unpriced_models_flags_zero_rate_usage(db, pricing):
+    _insert_event(
+        db,
+        pricing,
+        event_id="t:gem",
+        provider="gemini",
+        tool="gemini-cli",
+        model="gemini-3-pro",
+        input_tokens=1000,
+        output_tokens=100,
+    )
+    _insert_event(
+        db,
+        pricing,
+        event_id="t:ok",
+        model="claude-opus-4-8",
+        input_tokens=1000,
+        output_tokens=100,
+    )
+    _insert_event(  # local models are free on purpose — never flagged
+        db,
+        pricing,
+        event_id="t:loc",
+        model="llama3",
+        input_tokens=1000,
+        output_tokens=100,
+    )
+    flagged = metrics.unpriced_models(db, pricing)
+    assert [m["model"] for m in flagged] == ["gemini-3-pro"]
+
+
+def test_cache_savings_reads_minus_write_premium(db, pricing):
+    # Opus 4.8: input 5.00, cache_read 0.50, cache_write_5m 6.25 (per 1M tokens).
+    _insert_event(
+        db,
+        pricing,
+        event_id="t:c",
+        model="claude-opus-4-8",
+        input_tokens=1000,
+        output_tokens=500,
+        cache_read_tokens=4_000_000,
+        cache_creation_tokens=1_000_000,
+        cache_create_5m=1_000_000,
+    )
+    saved = metrics.cache_savings(db, pricing, TZ)
+    # reads: 4M * (5.00 - 0.50)/1M = 18.00 ; write premium: 1M * (6.25 - 5.00)/1M = 1.25
+    assert round(saved, 2) == 16.75
 
 
 def test_heatmap_buckets_by_day(tmp_path, db, pricing):
@@ -117,6 +221,6 @@ def test_heatmap_splits_by_provider(tmp_path, db, pricing):
 
 def test_top_turns_sorted_desc(tmp_path, db, pricing):
     _seed(tmp_path, db, pricing)
-    turns = metrics.top_turns(db, limit=10)
+    turns = metrics.top_turns(db, TZ, limit=10)
     costs = [t["cost"] for t in turns]
     assert costs == sorted(costs, reverse=True)

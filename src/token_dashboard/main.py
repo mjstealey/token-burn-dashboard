@@ -82,16 +82,7 @@ def create_app(state: AppState | None = None) -> FastAPI:
 
     @app.get("/")
     def index(request: Request):
-        return TEMPLATES.TemplateResponse(
-            request,
-            "dashboard.html",
-            {
-                "tz": tz,
-                "has_limits": bool(
-                    state.cfg.limit_block_5h_tokens or state.cfg.limit_week_tokens
-                ),
-            },
-        )
+        return TEMPLATES.TemplateResponse(request, "dashboard.html", {})
 
     @app.get("/api/health")
     def health():
@@ -102,6 +93,7 @@ def create_app(state: AppState | None = None) -> FastAPI:
             "last_ingest_at": state.last_ingest_at,
             "last_ingest": state.last_ingest,
             "last_pricing_sync": state.last_pricing_sync,
+            "unpriced_models": metrics.unpriced_models(state.db, state.pricing),
         }
 
     @app.get("/api/summary")
@@ -111,6 +103,7 @@ def create_app(state: AppState | None = None) -> FastAPI:
         s["last_ingest"] = state.last_ingest
         s["last_pricing_sync"] = state.last_pricing_sync
         s["timezone"] = tz
+        s["unpriced_models"] = metrics.unpriced_models(state.db, state.pricing)
         return s
 
     @app.get("/api/heatmap")
@@ -118,20 +111,25 @@ def create_app(state: AppState | None = None) -> FastAPI:
         return metrics.heatmap(state.db, tz, days=days, metric=metric)
 
     @app.get("/api/models")
-    def api_models():
-        return {"models": metrics.by_model(state.db)}
+    def api_models(days: int | None = None):
+        return {
+            "models": metrics.by_model(state.db, tz, days=days),
+            "cache_savings": metrics.cache_savings(
+                state.db, state.pricing, tz, days=days
+            ),
+        }
 
     @app.get("/api/projects")
-    def api_projects(limit: int = 30):
-        return {"projects": metrics.by_project(state.db, limit=limit)}
+    def api_projects(days: int | None = None, limit: int = 30):
+        return {"projects": metrics.by_project(state.db, tz, days=days, limit=limit)}
 
     @app.get("/api/sessions")
-    def api_sessions(limit: int = 25):
-        return {"sessions": metrics.top_sessions(state.db, limit=limit)}
+    def api_sessions(days: int | None = None, limit: int = 25):
+        return {"sessions": metrics.top_sessions(state.db, tz, days=days, limit=limit)}
 
     @app.get("/api/turns")
-    def api_turns(limit: int = 25):
-        return {"turns": metrics.top_turns(state.db, limit=limit)}
+    def api_turns(days: int | None = None, limit: int = 25):
+        return {"turns": metrics.top_turns(state.db, tz, days=days, limit=limit)}
 
     @app.get("/api/burn")
     def api_burn():

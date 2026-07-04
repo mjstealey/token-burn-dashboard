@@ -1,4 +1,4 @@
-from token_dashboard.pricing import Pricing, UsageBreakdown
+from token_dashboard.pricing import Pricing, UsageBreakdown, pricing_key
 
 M = 1_000_000
 
@@ -58,3 +58,22 @@ def test_unknown_model_falls_back_to_provider_default(pricing: Pricing):
 def test_prefix_match(pricing: Pricing):
     r = pricing.rate("openai", "gpt-5.4-mini-2026-01-01")
     assert r.input == 0.75  # matched gpt-5.4-mini
+
+
+def test_pricing_key_matches_claude_anywhere_in_model_id():
+    # Bedrock/Vertex ids carry prefixes; they must not fall into the $0 "local" table.
+    assert pricing_key("claude", "claude-opus-4-8") == "anthropic"
+    assert pricing_key("claude", "us.anthropic.claude-opus-4-8-v1:0") == "anthropic"
+    assert pricing_key("claude", "anthropic.claude-sonnet-4-6") == "anthropic"
+    assert pricing_key("claude", "llama3") == "local"  # genuinely local stays free
+    assert pricing_key("claude", None) == "local"
+    assert pricing_key("openai", "gpt-5.3-codex") == "openai"
+
+
+def test_is_unpriced_flags_all_zero_rates(pricing: Pricing):
+    # A provider absent from pricing.yaml resolves to an all-zero rate -> flagged.
+    assert pricing.is_unpriced("gemini", "gemini-3-pro")
+    # Known models and the intentionally-free local table are not flagged.
+    assert not pricing.is_unpriced("claude", "claude-opus-4-8")
+    assert not pricing.is_unpriced("claude", "llama3")  # local -> free on purpose
+    assert not pricing.is_unpriced("openai", "some-new-model")  # provider default

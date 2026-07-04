@@ -18,6 +18,18 @@ import yaml
 PER_TOKEN = 1_000_000.0
 
 
+def pricing_key(provider: str, model: str | None) -> str:
+    """Map a usage event's provider/model to a pricing.yaml top-level key.
+
+    Claude Code can route to local models (zero-rate "local" table), but Bedrock/
+    Vertex model ids carry prefixes ("us.anthropic.claude-...") — match "claude"
+    anywhere in the id, not just at the start, or those bill as $0 silently.
+    """
+    if provider == "claude":
+        return "anthropic" if "claude" in (model or "") else "local"
+    return provider
+
+
 @dataclass(frozen=True)
 class Rate:
     input: float = 0.0
@@ -62,6 +74,17 @@ class Pricing:
         raw = Path(path).expanduser().read_bytes()
         data = yaml.safe_load(raw.decode("utf-8")) or {}
         return cls(data, hashlib.sha256(raw).hexdigest())
+
+    def is_unpriced(self, provider: str, model: str | None) -> bool:
+        """True when the resolved rate is all-zero for a key that should have rates
+        (i.e. not the intentionally-free "local" table) — cost silently reads $0."""
+        key = pricing_key(provider, model)
+        if key == "local":
+            return False
+        r = self.rate(key, model)
+        return not any(
+            (r.input, r.output, r.cache_read, r.cache_write_5m, r.cache_write_1h)
+        )
 
     def rate(self, provider: str, model: str | None) -> Rate:
         prov = self._table.get(provider) or {}

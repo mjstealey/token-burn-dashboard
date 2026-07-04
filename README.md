@@ -51,12 +51,16 @@ TZ=America/Chicago docker compose up --build
 Requires [`uv`](https://docs.astral.sh/uv/).
 
 ```bash
-uv run token-dashboard serve        # ingests on boot, serves on :8080
+uv run token-dashboard serve        # ingests on boot, serves on 127.0.0.1:8080
 # or run a one-off ingest:
 uv run token-dashboard ingest
 uv run token-dashboard reprice       # reprice stored costs if pricing.yaml changed
 uv run pytest                        # run the test suite
 ```
+
+`serve` binds to loopback by default (it reads your private usage logs); pass
+`--host 0.0.0.0` to expose it on the network. The Docker entrypoint does this
+inside the container.
 
 ---
 
@@ -124,13 +128,21 @@ The **↻ refresh** button triggers an immediate ingest; the page also polls eve
 
 ## API
 
-`GET /` · `/api/summary` · `/api/heatmap?days=&metric=` · `/api/models` ·
-`/api/projects` · `/api/sessions` · `/api/turns` · `/api/burn` · `/api/health` ·
-`POST /api/ingest` · `POST /api/reprice?force=`.
+`GET /` · `/api/summary` · `/api/heatmap?days=&metric=` · `/api/models?days=` ·
+`/api/projects?days=&limit=` · `/api/sessions?days=&limit=` · `/api/turns?days=&limit=` ·
+`/api/burn` · `/api/health` · `POST /api/ingest` · `POST /api/reprice?force=`.
+
+`days` limits results to the last N *local* calendar days (snapped to local
+midnight, so the earliest day is never a partial total); omit it for all time.
+The dashboard's 30d/90d/180d/1y range toggle drives this parameter for the heat
+map **and** the models/projects/sessions/requests tables.
 
 `/api/heatmap` returns `{ metric, days, combined: [...], providers: { <provider>: [...] } }`
 (plus `series` as a back-compat alias for `combined`); each daily entry carries
 `cost`, `tokens`, and the `input`/`output`/`cache_read`/`cache_creation` breakdown.
+`/api/models` also returns `cache_savings` (notional $ saved by prompt caching over
+the same window), and `/api/summary` and `/api/health` list `unpriced_models` —
+models with usage whose resolved rate is all-zero, i.e. silently undercounting.
 
 ---
 

@@ -55,11 +55,25 @@ def test_endpoints_serve(tmp_path):
         s = client.get("/api/summary").json()
         assert s["all_time"]["events"] == 1
         assert s["all_time"]["tokens"] == 150
+        assert "prev_7d" in s and "prev_30d" in s
+        assert s["unpriced_models"] == []  # opus is priced
 
         hm = client.get("/api/heatmap?days=90&metric=cost").json()
         assert hm["metric"] == "cost"
         assert "combined" in hm and "providers" in hm
         assert "claude" in hm["providers"]  # only Claude was seeded
 
-        assert client.get("/api/models").json()["models"]
+        m = client.get("/api/models").json()
+        assert m["models"]
+        assert "cache_savings" in m
+
+        # The seeded event is dated 2026-06-18; a tight window must exclude it
+        # while the unbounded call still returns it.
+        assert client.get("/api/models?days=1").json()["models"] == []
+        assert client.get("/api/sessions?days=1").json()["sessions"] == []
+        assert client.get("/api/turns?days=1").json()["turns"] == []
+        assert client.get("/api/projects?days=1").json()["projects"] == []
+        assert client.get("/api/turns").json()["turns"]
+
         assert "block_5h" in client.get("/api/burn").json()
+        assert "unpriced_models" in client.get("/api/health").json()

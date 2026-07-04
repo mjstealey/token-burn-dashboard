@@ -23,6 +23,7 @@
   </header>
 
   <p class="freshness" id="freshness">Loading…</p>
+  <p class="warnings" id="warnings" hidden></p>
 
   <section class="kpis" id="kpis"></section>
 
@@ -48,23 +49,23 @@
   </section>
 
   <section class="card">
-    <div class="card-head"><h2>Models</h2><span class="note">$ and cache efficiency, all time</span></div>
+    <div class="card-head"><h2>Models</h2><span class="note" id="models-note">$ and cache efficiency</span></div>
     <div id="models"></div>
   </section>
 
   <section class="grid-2">
     <div class="card">
-      <div class="card-head"><h2>Projects</h2><span class="note">by directory</span></div>
+      <div class="card-head"><h2>Projects</h2><span class="note" id="projects-note">by directory</span></div>
       <div id="projects"></div>
     </div>
     <div class="card">
-      <div class="card-head"><h2>Top sessions</h2><span class="note">most expensive</span></div>
+      <div class="card-head"><h2>Top sessions</h2><span class="note" id="sessions-note">most expensive</span></div>
       <div id="sessions"></div>
     </div>
   </section>
 
   <section class="card">
-    <div class="card-head"><h2>Most expensive requests</h2><span class="note">where the burn went</span></div>
+    <div class="card-head"><h2>Most expensive requests</h2><span class="note" id="turns-note">where the burn went</span></div>
     <div id="turns"></div>
   </section>
 
