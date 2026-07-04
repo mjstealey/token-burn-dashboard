@@ -5,6 +5,7 @@ const state = { metric: "cost", days: 365, filter: null }; // filter: {type:"mod
 const heatmapCharts = {}; // panel key ("combined"|"claude"|"openai"...) -> ECharts instance
 const heatmapDayIndex = {}; // panel key -> { "2026-06-18": dataIndex } for cross-panel hover
 let lineChart = null;
+let punchChart = null;
 let lastHeatmap = null; // last /api/heatmap payload, kept so toggles re-render without refetch
 let lastHeatmapSig = null; // render signature; unchanged 60s polls skip the re-render
 let seriesEnabled = loadEnabledPanels(); // { key: bool } or null until first load fills it
@@ -246,7 +247,7 @@ function renderFilterChip() {
 function setFilter(f) {
   state.filter = f;
   updateFilteredRows();
-  withErrorState(loadHeatmap());
+  withErrorState(Promise.all([loadHeatmap(), loadPunchcard()]));
 }
 
 // Keep row highlighting in sync without re-fetching the tables.
@@ -489,6 +490,88 @@ function renderLine(series) {
   }, true);
 }
 
+/* ---------- punchcard ---------- */
+const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+async function loadPunchcard() {
+  const { punchcard } = await getJSON(`/api/punchcard?days=${state.days}${filterQuery()}`);
+  const filt = state.filter
+    ? ` · only ${state.filter.type === "project" ? shortPath(state.filter.value) : state.filter.value}`
+    : "";
+  document.getElementById("punchcard-note").textContent =
+    `when the burn happens · local hour × weekday · color = ${state.metric === "cost" ? "$" : "tokens"} · ${rangeLabel()}${filt}`;
+  renderPunchcard(punchcard || []);
+}
+
+function renderPunchcard(rows) {
+  const el = document.getElementById("punchcard");
+  if (!punchChart) punchChart = echarts.init(el, null, { renderer: "canvas" });
+  if (!rows.length) { punchChart.clear(); return; }
+
+  // Fill all 7x24 cells so quiet hours render as (palest) tiles, not holes.
+  const byKey = {};
+  rows.forEach((r) => { byKey[`${r.dow}-${r.hour}`] = r; });
+  const cells = [];
+  for (let d = 0; d < 7; d++) {
+    for (let h = 0; h < 24; h++) {
+      const r = byKey[`${d}-${h}`] || null;
+      cells.push({ value: [h, d, r ? metricVal(r) : 0], raw: r });
+    }
+  }
+  const maxV = Math.max(...rows.map(metricVal));
+
+  const ink = cssVar("--ink"), muted = cssVar("--muted"), panel = cssVar("--panel"),
+    rule = cssVar("--rule"), bg = cssVar("--bg");
+
+  punchChart.setOption({
+    tooltip: {
+      borderColor: rule,
+      backgroundColor: panel,
+      textStyle: { color: ink, fontSize: 12 },
+      formatter: (p) => {
+        const [h, d] = p.data.value;
+        const win = `${DOW_LABELS[d]} ${String(h).padStart(2, "0")}:00–${String((h + 1) % 24).padStart(2, "0")}:00`;
+        const r = p.data.raw;
+        if (!r) return `<b>${win}</b><br/>no activity`;
+        return `<b>${win}</b><br/>${fmtMoney(r.cost)} · ${fmtTokens(r.tokens)} tok · ` +
+          `${(r.events || 0).toLocaleString()} req`;
+      },
+    },
+    grid: { top: 8, left: 40, right: 12, bottom: 46 },
+    xAxis: {
+      type: "category",
+      data: Array.from({ length: 24 }, (_, h) => h),
+      axisLine: { show: false },
+      axisTick: { show: false },
+      axisLabel: { color: muted, fontSize: 10, interval: 2 },
+    },
+    yAxis: {
+      type: "category",
+      data: DOW_LABELS,
+      inverse: true, // Sunday on top, matching the calendar rows
+      axisLine: { show: false },
+      axisTick: { show: false },
+      axisLabel: { color: muted, fontSize: 10 },
+    },
+    visualMap: {
+      type: "piecewise",
+      pieces: buckets(maxV, rampFor("combined"), fmtMetric),
+      orient: "horizontal",
+      left: "center",
+      bottom: 0,
+      itemWidth: 12,
+      itemHeight: 12,
+      itemGap: 4,
+      textStyle: { color: muted, fontSize: 10 },
+    },
+    series: [{
+      type: "heatmap",
+      data: cells,
+      itemStyle: { borderColor: bg, borderWidth: 2 },
+    }],
+  }, true);
+}
+
 /* ---------- burn ---------- */
 async function loadBurn() {
   const b = await getJSON("/api/burn");
@@ -631,13 +714,14 @@ function withErrorState(p) {
 
 function loadAll() {
   return withErrorState(Promise.all([
-    loadSummary(), loadHeatmap(), loadBurn(),
+    loadSummary(), loadHeatmap(), loadPunchcard(), loadBurn(),
     loadModels(), loadProjects(), loadSessions(), loadTurns(),
   ]));
 }
 function loadRangeScoped() {
   return withErrorState(Promise.all([
-    loadHeatmap(), loadModels(), loadProjects(), loadSessions(), loadTurns(),
+    loadHeatmap(), loadPunchcard(),
+    loadModels(), loadProjects(), loadSessions(), loadTurns(),
   ]));
 }
 
@@ -655,7 +739,8 @@ function wireToggle(id, key, cast, onChange) {
 document.addEventListener("DOMContentLoaded", () => {
   applyTheme(currentTheme()); // sync the toggle button to the attribute set in <head>
   document.getElementById("theme-toggle").addEventListener("click", toggleTheme);
-  wireToggle("metric-toggle", "metric", (v) => v, () => withErrorState(loadHeatmap()));
+  wireToggle("metric-toggle", "metric", (v) => v,
+    () => withErrorState(Promise.all([loadHeatmap(), loadPunchcard()])));
   wireToggle("range-toggle", "days", (v) => parseInt(v, 10), loadRangeScoped);
   document.getElementById("refresh").addEventListener("click", async (e) => {
     const btn = e.target;
@@ -682,6 +767,7 @@ document.addEventListener("DOMContentLoaded", () => {
   window.addEventListener("resize", () => {
     Object.values(heatmapCharts).forEach((c) => c.resize());
     if (lineChart) lineChart.resize();
+    if (punchChart) punchChart.resize();
   });
   // Lightweight polling so the dashboard stays current while open. Unchanged
   // heat-map payloads skip the re-render (see loadHeatmap).

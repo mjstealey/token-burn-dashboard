@@ -242,6 +242,20 @@ def test_heatmap_project_filter(tmp_path, db, pricing):
     assert sum(r["tokens"] for r in hm["combined"]) == 2800  # codex event only
 
 
+def test_punchcard_buckets_local_weekday_hour(tmp_path, db, pricing):
+    _seed(tmp_path, db, pricing)
+    # 2026-06-18 is a Thursday (dow=4); America/New_York in June is UTC-4:
+    # claude 12:00Z -> 08:00 local, codex 09:00:05Z -> 05:00 local.
+    rows = metrics.punchcard(db, TZ)
+    cells = {(r["dow"], r["hour"]): r["tokens"] for r in rows}
+    assert cells == {(4, 8): 5500, (4, 5): 2800}
+    assert all(r["events"] == 1 for r in rows)
+    # Same model/range filters as the heat map.
+    only_codex = metrics.punchcard(db, TZ, model="gpt-5.3-codex")
+    assert [(r["dow"], r["hour"]) for r in only_codex] == [(4, 5)]
+    assert metrics.punchcard(db, TZ, days=1) == []
+
+
 def test_export_events_scoped_and_ordered(tmp_path, db, pricing):
     _seed(tmp_path, db, pricing)
     rows = metrics.export_events(db, TZ)

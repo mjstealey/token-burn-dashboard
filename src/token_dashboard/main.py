@@ -119,6 +119,18 @@ def create_app(state: AppState | None = None) -> FastAPI:
             state.db, tz, days=days, metric=metric, model=model, project=project
         )
 
+    @app.get("/api/punchcard")
+    def api_punchcard(
+        days: int | None = None,
+        model: str | None = None,
+        project: str | None = None,
+    ):
+        return {
+            "punchcard": metrics.punchcard(
+                state.db, tz, days=days, model=model, project=project
+            )
+        }
+
     @app.get("/api/export.csv")
     def api_export_csv(
         days: int | None = None,

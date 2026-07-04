@@ -170,6 +170,35 @@ def heatmap(
     }
 
 
+def punchcard(
+    db: Database,
+    tz: str,
+    days: int | None = None,
+    model: str | None = None,
+    project: str | None = None,
+) -> list[dict]:
+    """Local weekday x hour totals — the 'when does the burn happen' view.
+
+    ``dow`` is 0=Sunday..6=Saturday (DuckDB/Postgres EXTRACT semantics), matching
+    the calendar heat map's Sunday-first rows.
+    """
+    where, params = _filters(tz, days, model, project)
+    return db.query_dicts(
+        f"""
+        SELECT EXTRACT(dow FROM (ts AT TIME ZONE ?)) AS dow,
+               EXTRACT(hour FROM (ts AT TIME ZONE ?)) AS hour,
+               COALESCE(SUM(cost_usd),0) AS cost,
+               COALESCE(SUM({TOK}),0) AS tokens,
+               COUNT(*) AS events
+        FROM usage_events
+        WHERE {where}
+        GROUP BY dow, hour
+        ORDER BY dow, hour
+        """,
+        [tz, tz, *params],
+    )
+
+
 def by_model(db: Database, tz: str, days: int | None = None) -> list[dict]:
     where, params = _since(tz, days)
     return db.query_dicts(
