@@ -80,6 +80,7 @@ main { max-width: 1100px; margin: 0 auto; padding: 28px 24px 64px; }
 .chart { width: 100%; }
 .heatmap-chart { height: 170px; }
 .line-chart { height: 120px; margin-top: 6px; }
+.punchcard-chart { height: 210px; }
 
 /* Per-provider heatmap panels + show/hide chips */
 .series-toggle { display: flex; gap: 8px; flex-wrap: wrap; margin: 2px 0 6px; }

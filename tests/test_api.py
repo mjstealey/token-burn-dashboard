@@ -78,6 +78,12 @@ def test_endpoints_serve(tmp_path):
         assert "block_5h" in client.get("/api/burn").json()
         assert "unpriced_models" in client.get("/api/health").json()
 
+        pc = client.get("/api/punchcard").json()["punchcard"]
+        assert len(pc) == 1 and {"dow", "hour", "cost", "tokens", "events"} <= set(
+            pc[0]
+        )
+        assert client.get("/api/punchcard?days=1").json()["punchcard"] == []
+
         # Heat-map click-to-filter params.
         assert (
             "claude"
