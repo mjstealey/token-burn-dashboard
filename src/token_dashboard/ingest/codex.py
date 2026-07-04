@@ -45,6 +45,7 @@ class CodexAdapter(Adapter):
         m = _FILE_UUID.search(path.name)
         session_id = m.group(1) if m else path.stem
         current_model: str | None = None
+        current_cwd: str | None = None  # like model, cwd rides on earlier records
         ordinal = 0
         events: list[UsageEvent] = []
 
@@ -65,9 +66,11 @@ class CodexAdapter(Adapter):
 
             if rtype == "session_meta":
                 session_id = payload.get("id") or session_id
+                current_cwd = payload.get("cwd") or current_cwd
                 continue
             if rtype == "turn_context":
                 current_model = payload.get("model") or current_model
+                current_cwd = payload.get("cwd") or current_cwd
                 continue
             if rtype != "event_msg" or payload.get("type") != "token_count":
                 continue
@@ -102,7 +105,7 @@ class CodexAdapter(Adapter):
                     output_tokens=output,
                     cache_read_tokens=cached,
                     reasoning_tokens=reasoning,
-                    project=payload.get("cwd"),
+                    project=payload.get("cwd") or current_cwd,
                 )
             )
         return events, new_offset

@@ -19,6 +19,7 @@
       </div>
       <button id="theme-toggle" class="ghost" title="Toggle light/dark" aria-label="Toggle theme">☾</button>
       <button id="refresh" class="ghost" title="Re-ingest logs now">↻ refresh</button>
+      <button id="export" class="ghost" title="Download raw events as CSV (current range + filter)">⬇ csv</button>
     </div>
   </header>
 
@@ -32,6 +33,7 @@
       <h2>Daily burn</h2>
       <span class="note" id="heatmap-note">color = daily $ · log-spaced</span>
     </div>
+    <div class="filter-chip" id="heatmap-filter" hidden></div>
     <div class="series-toggle" id="series-toggle" role="group" aria-label="Heatmaps to show"></div>
     <div id="heatmaps"></div>
     <div id="dailyline" class="chart line-chart"></div>

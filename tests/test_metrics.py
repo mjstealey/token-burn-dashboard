@@ -224,3 +224,31 @@ def test_top_turns_sorted_desc(tmp_path, db, pricing):
     turns = metrics.top_turns(db, TZ, limit=10)
     costs = [t["cost"] for t in turns]
     assert costs == sorted(costs, reverse=True)
+
+
+def test_heatmap_model_filter(tmp_path, db, pricing):
+    _seed(tmp_path, db, pricing)
+    hm = metrics.heatmap(db, TZ, days=365, model="claude-opus-4-8")
+    assert set(hm["providers"]) == {"claude"}
+    assert sum(r["tokens"] for r in hm["combined"]) == 5500  # claude event only
+    # '(unknown)' (the UI's NULL label) must match NULL models, not the literal.
+    assert metrics.heatmap(db, TZ, days=365, model="(unknown)")["combined"] == []
+
+
+def test_heatmap_project_filter(tmp_path, db, pricing):
+    _seed(tmp_path, db, pricing)
+    hm = metrics.heatmap(db, TZ, days=365, project="/proj-b")
+    assert set(hm["providers"]) == {"openai"}
+    assert sum(r["tokens"] for r in hm["combined"]) == 2800  # codex event only
+
+
+def test_export_events_scoped_and_ordered(tmp_path, db, pricing):
+    _seed(tmp_path, db, pricing)
+    rows = metrics.export_events(db, TZ)
+    assert len(rows) == 2
+    assert [set(r) == set(metrics.EXPORT_COLUMNS) for r in rows]
+    ts = [r["ts"] for r in rows]
+    assert ts == sorted(ts)  # oldest first
+    only_claude = metrics.export_events(db, TZ, model="claude-opus-4-8")
+    assert [r["provider"] for r in only_claude] == ["claude"]
+    assert metrics.export_events(db, TZ, days=1) == []  # seeded events are older

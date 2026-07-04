@@ -82,6 +82,19 @@ def test_model_joined_from_turn_context(tmp_path, db, pricing):
     assert models == [("gpt-5.3-codex",)]
 
 
+def test_project_joined_from_context(tmp_path, db, pricing):
+    # cwd lives on session_meta/turn_context, not on the token_count record itself —
+    # without the join, every Codex event lands in project '(none)'.
+    f = (
+        tmp_path
+        / "rollout-2026-06-18T09-00-00-aaaaaaaa-bbbb-cccc-dddd-ffffffffffff.jsonl"
+    )
+    write_jsonl(f, _records())
+    ingest_one(db, pricing, CodexAdapter(), f)
+    projects = db.query("SELECT DISTINCT project FROM usage_events")
+    assert projects == [("/proj",)]
+
+
 def test_stable_event_ids_idempotent(tmp_path, db, pricing):
     f = (
         tmp_path

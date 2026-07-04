@@ -128,9 +128,10 @@ The **↻ refresh** button triggers an immediate ingest; the page also polls eve
 
 ## API
 
-`GET /` · `/api/summary` · `/api/heatmap?days=&metric=` · `/api/models?days=` ·
-`/api/projects?days=&limit=` · `/api/sessions?days=&limit=` · `/api/turns?days=&limit=` ·
-`/api/burn` · `/api/health` · `POST /api/ingest` · `POST /api/reprice?force=`.
+`GET /` · `/api/summary` · `/api/heatmap?days=&metric=&model=&project=` ·
+`/api/models?days=` · `/api/projects?days=&limit=` · `/api/sessions?days=&limit=` ·
+`/api/turns?days=&limit=` · `/api/export.csv?days=&model=&project=` · `/api/burn` ·
+`/api/health` · `POST /api/ingest` · `POST /api/reprice?force=`.
 
 `days` limits results to the last N *local* calendar days (snapped to local
 midnight, so the earliest day is never a partial total); omit it for all time.
@@ -143,6 +144,12 @@ map **and** the models/projects/sessions/requests tables.
 `/api/models` also returns `cache_savings` (notional $ saved by prompt caching over
 the same window), and `/api/summary` and `/api/health` list `unpriced_models` —
 models with usage whose resolved rate is all-zero, i.e. silently undercounting.
+
+`model=`/`project=` scope the heat map and CSV export to one model or project
+directory — in the UI, click a row in the **Models** or **Projects** table to apply
+the filter (click again, or the ✕ chip, to clear). `/api/export.csv` streams the raw
+usage events (one row per request, all token classes + cost) for downstream
+analysis; the **⬇ csv** button downloads the current range and filter.
 
 ---
 
