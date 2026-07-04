@@ -77,3 +77,24 @@ def test_endpoints_serve(tmp_path):
 
         assert "block_5h" in client.get("/api/burn").json()
         assert "unpriced_models" in client.get("/api/health").json()
+
+        # Heat-map click-to-filter params.
+        assert (
+            "claude"
+            in client.get("/api/heatmap?model=claude-opus-4-8").json()["providers"]
+        )
+        assert client.get("/api/heatmap?model=nope").json()["combined"] == []
+        assert "claude" in client.get("/api/heatmap?project=/proj").json()["providers"]
+
+        # CSV export: header + the seeded event; range/filter params scope it.
+        ex = client.get("/api/export.csv")
+        assert ex.status_code == 200
+        assert ex.headers["content-type"].startswith("text/csv")
+        assert "attachment" in ex.headers["content-disposition"]
+        lines = ex.text.strip().splitlines()
+        assert lines[0].startswith("ts,provider,tool,model,project")
+        assert len(lines) == 2 and "claude-opus-4-8" in lines[1]
+        assert len(client.get("/api/export.csv?days=1").text.strip().splitlines()) == 1
+        assert (
+            len(client.get("/api/export.csv?model=nope").text.strip().splitlines()) == 1
+        )

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import csv
 import datetime as dt
+import io
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
@@ -107,8 +109,42 @@ def create_app(state: AppState | None = None) -> FastAPI:
         return s
 
     @app.get("/api/heatmap")
-    def api_heatmap(days: int = 365, metric: str = "cost"):
-        return metrics.heatmap(state.db, tz, days=days, metric=metric)
+    def api_heatmap(
+        days: int = 365,
+        metric: str = "cost",
+        model: str | None = None,
+        project: str | None = None,
+    ):
+        return metrics.heatmap(
+            state.db, tz, days=days, metric=metric, model=model, project=project
+        )
+
+    @app.get("/api/export.csv")
+    def api_export_csv(
+        days: int | None = None,
+        model: str | None = None,
+        project: str | None = None,
+    ):
+        rows = metrics.export_events(
+            state.db, tz, days=days, model=model, project=project
+        )
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(metrics.EXPORT_COLUMNS)
+        for r in rows:
+            writer.writerow(
+                [
+                    r[c].isoformat() if c == "ts" and r[c] is not None else r[c]
+                    for c in metrics.EXPORT_COLUMNS
+                ]
+            )
+        return Response(
+            content=buf.getvalue(),
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": 'attachment; filename="token-burn-events.csv"'
+            },
+        )
 
     @app.get("/api/models")
     def api_models(days: int | None = None):

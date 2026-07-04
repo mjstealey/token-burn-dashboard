@@ -1,7 +1,7 @@
 /* Token Burn dashboard — fetches JSON metrics and renders a Tufte-style
    calendar heat map plus supporting breakdowns. No build step. */
 
-const state = { metric: "cost", days: 365 };
+const state = { metric: "cost", days: 365, filter: null }; // filter: {type:"model"|"project", value}
 const heatmapCharts = {}; // panel key ("combined"|"claude"|"openai"...) -> ECharts instance
 const heatmapDayIndex = {}; // panel key -> { "2026-06-18": dataIndex } for cross-panel hover
 let lineChart = null;
@@ -211,19 +211,70 @@ function buckets(max, ramp, fmt) {
   return pieces;
 }
 
+function filterQuery() {
+  return state.filter ? `&${state.filter.type}=${encodeURIComponent(state.filter.value)}` : "";
+}
+
 async function loadHeatmap() {
-  const data = await getJSON(`/api/heatmap?days=${state.days}&metric=${state.metric}`);
+  const data = await getJSON(`/api/heatmap?days=${state.days}&metric=${state.metric}${filterQuery()}`);
   lastHeatmap = data;
   // Skip the re-render when nothing changed (60s poll) — a full setOption redraw
   // closes any open tooltip and flickers the canvas.
-  const sig = JSON.stringify([data.combined, data.providers, state.metric, state.days, currentTheme()]);
+  const sig = JSON.stringify([data.combined, data.providers, state.metric, state.days, state.filter, currentTheme()]);
   if (sig === lastHeatmapSig && Object.keys(heatmapCharts).length) return;
   lastHeatmapSig = sig;
   document.getElementById("heatmap-note").textContent =
     `color = daily ${state.metric === "cost" ? "$" : "tokens"} · totals & scale = ${rangeLabel()} per panel · hover for detail`;
+  renderFilterChip();
   renderSeriesToggle(data);
   renderHeatmaps(data);
   renderLine(data.combined || data.series || []);
+}
+
+/* ---------- click-to-filter ---------- */
+function renderFilterChip() {
+  const el = document.getElementById("heatmap-filter");
+  if (!state.filter) { el.hidden = true; el.innerHTML = ""; return; }
+  const label = state.filter.type === "project" ? shortPath(state.filter.value) : state.filter.value;
+  el.hidden = false;
+  el.innerHTML =
+    `<span title="${esc(state.filter.value)}">only ${esc(state.filter.type)} <b class="mono">${esc(label)}</b></span>` +
+    `<button id="filter-clear" title="Clear filter" aria-label="Clear filter">✕</button>`;
+  document.getElementById("filter-clear").addEventListener("click", () => setFilter(null));
+}
+
+function setFilter(f) {
+  state.filter = f;
+  updateFilteredRows();
+  withErrorState(loadHeatmap());
+}
+
+// Keep row highlighting in sync without re-fetching the tables.
+function updateFilteredRows() {
+  document.querySelectorAll("tr[data-fkind]").forEach((tr) => {
+    const on = state.filter
+      && state.filter.type === tr.dataset.fkind
+      && state.filter.value === tr.dataset.fval;
+    tr.classList.toggle("filtered", !!on);
+  });
+}
+
+// Clicking a Models/Projects row scopes the Daily burn card to it; again to clear.
+function wireRowFilters(containerId) {
+  document.querySelectorAll(`#${containerId} tr[data-fkind]`).forEach((tr) => {
+    tr.addEventListener("click", () => {
+      const f = { type: tr.dataset.fkind, value: tr.dataset.fval };
+      const same = state.filter
+        && state.filter.type === f.type && state.filter.value === f.value;
+      setFilter(same ? null : f);
+    });
+  });
+}
+
+function rowFilterAttr(kind, value) {
+  const on = state.filter && state.filter.type === kind && state.filter.value === value;
+  return `data-fkind="${esc(kind)}" data-fval="${esc(value)}"` +
+    `${on ? ' class="filtered"' : ""} title="Filter the daily burn to this ${kind}"`;
 }
 
 // "combined" first, then each provider alphabetically.
@@ -474,9 +525,11 @@ function burnRow(k, v, util, limit) {
 }
 
 /* ---------- tables ---------- */
-function table(headers, rows) {
+function table(headers, rows, rowAttrs) {
   const head = headers.map((h) => `<th>${h}</th>`).join("");
-  const body = rows.map((r) => "<tr>" + r.map((c) => `<td>${c}</td>`).join("") + "</tr>").join("");
+  const body = rows.map((r, i) =>
+    `<tr${rowAttrs && rowAttrs[i] ? " " + rowAttrs[i] : ""}>` +
+    r.map((c) => `<td>${c}</td>`).join("") + "</tr>").join("");
   return `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
 }
 function miniBar(frac, color) {
@@ -504,8 +557,11 @@ async function loadModels() {
       reasoning, (m.events || 0).toLocaleString(),
     ];
   });
-  document.getElementById("models").innerHTML =
-    table(["Model", "Tokens", "$", "Cache hit", "Reasoning", "Req"], rows);
+  document.getElementById("models").innerHTML = table(
+    ["Model", "Tokens", "$", "Cache hit", "Reasoning", "Req"], rows,
+    models.map((m) => rowFilterAttr("model", m.model || "(unknown)")),
+  );
+  wireRowFilters("models");
 }
 
 async function loadProjects() {
@@ -517,7 +573,11 @@ async function loadProjects() {
       ` <span class="mono" title="${esc(p.project)}">${esc(shortPath(p.project))}</span>`,
     fmtMoney(p.cost), fmtTokens(p.tokens), p.sessions,
   ]);
-  document.getElementById("projects").innerHTML = table(["Project", "$", "Tokens", "Sess"], rows);
+  document.getElementById("projects").innerHTML = table(
+    ["Project", "$", "Tokens", "Sess"], rows,
+    projects.map((p) => rowFilterAttr("project", p.project || "(none)")),
+  );
+  wireRowFilters("projects");
 }
 
 async function loadSessions() {
@@ -613,6 +673,10 @@ document.addEventListener("DOMContentLoaded", () => {
     } finally {
       btn.disabled = false;
     }
+  });
+  document.getElementById("export").addEventListener("click", () => {
+    // Raw events for the current range (and active filter, if any).
+    window.location.href = `/api/export.csv?days=${state.days}${filterQuery()}`;
   });
   loadAll();
   window.addEventListener("resize", () => {

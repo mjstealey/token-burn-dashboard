@@ -93,6 +93,21 @@ main { max-width: 1100px; margin: 0 auto; padding: 28px 24px 64px; }
 .series-toggle button.on .dot { background: var(--accent); }
 .series-toggle button[aria-pressed="false"] { opacity: 0.7; }
 
+/* Click-to-filter: active-filter chip + clickable table rows */
+.filter-chip {
+  display: inline-flex; align-items: center; gap: 8px;
+  margin: 2px 0 8px; padding: 4px 12px; border-radius: 999px;
+  background: var(--accent-soft); color: var(--accent); font-size: 12.5px;
+}
+.filter-chip[hidden] { display: none; }
+.filter-chip b { font-weight: 600; }
+.filter-chip button {
+  border: 0; background: none; color: inherit; cursor: pointer;
+  font-size: 13px; padding: 0 2px; line-height: 1;
+}
+tr[data-fkind] { cursor: pointer; }
+tr.filtered td { background: var(--accent-soft); }
+
 .heatmap-panel { margin-top: 8px; }
 .heatmap-label {
   display: flex; align-items: baseline; justify-content: space-between;

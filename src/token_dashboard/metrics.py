@@ -29,6 +29,31 @@ def _since(tz: str, days: int | None) -> tuple[str, list[Any]]:
     )
 
 
+def _filters(
+    tz: str,
+    days: int | None,
+    model: str | None = None,
+    project: str | None = None,
+) -> tuple[str, list[Any]]:
+    """Range clause plus optional exact model/project filters. The UI's grouped
+    views label NULLs '(unknown)'/'(none)', so those spellings match the NULLs."""
+    where, params = _since(tz, days)
+    clauses = [where]
+    if model is not None:
+        if model == "(unknown)":
+            clauses.append("model IS NULL")
+        else:
+            clauses.append("model = ?")
+            params.append(model)
+    if project is not None:
+        if project == "(none)":
+            clauses.append("project IS NULL")
+        else:
+            clauses.append("project = ?")
+            params.append(project)
+    return " AND ".join(clauses), params
+
+
 def _one(db: Database, sql: str, params: list[Any] | None = None) -> dict:
     rows = db.query_dicts(sql, params)
     return rows[0] if rows else {}
@@ -89,14 +114,22 @@ def summary(db: Database, tz: str) -> dict:
 _DAY_FIELDS = ("cost", "tokens", "input", "output", "cache_read", "cache_creation")
 
 
-def heatmap(db: Database, tz: str, days: int = 365, metric: str = "cost") -> dict:
+def heatmap(
+    db: Database,
+    tz: str,
+    days: int = 365,
+    metric: str = "cost",
+    model: str | None = None,
+    project: str | None = None,
+) -> dict:
     """Daily series bucketed by local day, split per provider plus a combined total.
 
     Returns ``combined`` (all providers summed per day) and ``providers`` (a map of
     provider -> daily series). ``series`` is kept as an alias for ``combined`` for
-    backwards compatibility.
+    backwards compatibility. ``model``/``project`` scope the series to one model or
+    one project directory (the dashboard's click-to-filter).
     """
-    where, params = _since(tz, days)
+    where, params = _filters(tz, days, model, project)
     rows = db.query_dicts(
         f"""
         SELECT CAST(ts AT TIME ZONE ? AS DATE) AS day, provider,
@@ -220,6 +253,49 @@ def top_turns(
         LIMIT ?
         """,
         [*params, limit],
+    )
+
+
+# Raw-event export, analytically-primary columns first.
+EXPORT_COLUMNS = [
+    "ts",
+    "provider",
+    "tool",
+    "model",
+    "project",
+    "git_branch",
+    "session_id",
+    "request_id",
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_tokens",
+    "cache_read_tokens",
+    "cache_create_5m",
+    "cache_create_1h",
+    "reasoning_tokens",
+    "web_search_requests",
+    "web_fetch_requests",
+    "service_tier",
+    "cost_usd",
+    "event_id",
+    "source_file",
+]
+
+
+def export_events(
+    db: Database,
+    tz: str,
+    days: int | None = None,
+    model: str | None = None,
+    project: str | None = None,
+) -> list[dict]:
+    """Raw usage events for downstream analysis, oldest first, honoring the same
+    range and model/project filters as the dashboard."""
+    where, params = _filters(tz, days, model, project)
+    return db.query_dicts(
+        f"SELECT {', '.join(EXPORT_COLUMNS)} FROM usage_events "
+        f"WHERE {where} ORDER BY ts",
+        params,
     )
 
 
