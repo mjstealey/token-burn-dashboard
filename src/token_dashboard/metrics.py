@@ -10,9 +10,23 @@ from __future__ import annotations
 from typing import Any
 
 from .db import Database
+from .pricing import PER_TOKEN, Pricing, pricing_key
 
 # Total tokens across every billable class.
 TOK = "(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens)"
+
+
+def _since(tz: str, days: int | None) -> tuple[str, list[Any]]:
+    """WHERE fragment limiting to the last `days` LOCAL calendar days (inclusive of
+    today). Snapping to local midnight — rather than a rolling now()-N cutoff —
+    keeps the earliest day in range from carrying a partial, understated total."""
+    if not days or days <= 0:
+        return "1=1", []
+    return (
+        "CAST(ts AT TIME ZONE ? AS DATE) >= "
+        "CAST(now() AT TIME ZONE ? AS DATE) - (CAST(? AS INTEGER) - 1)",
+        [tz, tz, days],
+    )
 
 
 def _one(db: Database, sql: str, params: list[Any] | None = None) -> dict:
@@ -37,6 +51,17 @@ def summary(db: Database, tz: str) -> dict:
     )
     last_7d = _window(db, "ts >= now() - (7 * INTERVAL '1 day')", [])
     last_30d = _window(db, "ts >= now() - (30 * INTERVAL '1 day')", [])
+    # Prior windows of the same length, so the UI can show a period-over-period delta.
+    prev_7d = _window(
+        db,
+        "ts >= now() - (14 * INTERVAL '1 day') AND ts < now() - (7 * INTERVAL '1 day')",
+        [],
+    )
+    prev_30d = _window(
+        db,
+        "ts >= now() - (60 * INTERVAL '1 day') AND ts < now() - (30 * INTERVAL '1 day')",
+        [],
+    )
     all_time = _window(db, "1=1", [])
 
     meta = _one(
@@ -53,6 +78,8 @@ def summary(db: Database, tz: str) -> dict:
         "today": today,
         "last_7d": last_7d,
         "last_30d": last_30d,
+        "prev_7d": prev_7d,
+        "prev_30d": prev_30d,
         "all_time": all_time,
         "meta": meta,
         "providers": providers,
@@ -69,6 +96,7 @@ def heatmap(db: Database, tz: str, days: int = 365, metric: str = "cost") -> dic
     provider -> daily series). ``series`` is kept as an alias for ``combined`` for
     backwards compatibility.
     """
+    where, params = _since(tz, days)
     rows = db.query_dicts(
         f"""
         SELECT CAST(ts AT TIME ZONE ? AS DATE) AS day, provider,
@@ -79,10 +107,10 @@ def heatmap(db: Database, tz: str, days: int = 365, metric: str = "cost") -> dic
                COALESCE(SUM(cache_read_tokens),0) AS cache_read,
                COALESCE(SUM(cache_creation_tokens),0) AS cache_creation
         FROM usage_events
-        WHERE ts >= now() - (CAST(? AS INTEGER) * INTERVAL '1 day')
+        WHERE {where}
         GROUP BY day, provider ORDER BY day
         """,
-        [tz, days],
+        [tz, *params],
     )
 
     providers: dict[str, list[dict]] = {}
@@ -109,7 +137,8 @@ def heatmap(db: Database, tz: str, days: int = 365, metric: str = "cost") -> dic
     }
 
 
-def by_model(db: Database) -> list[dict]:
+def by_model(db: Database, tz: str, days: int | None = None) -> list[dict]:
+    where, params = _since(tz, days)
     return db.query_dicts(
         f"""
         SELECT provider, COALESCE(model, '(unknown)') AS model,
@@ -119,15 +148,21 @@ def by_model(db: Database) -> list[dict]:
                COALESCE(SUM(input_tokens),0) AS input,
                COALESCE(SUM(output_tokens),0) AS output,
                COALESCE(SUM(cache_read_tokens),0) AS cache_read,
-               COALESCE(SUM(cache_creation_tokens),0) AS cache_creation
+               COALESCE(SUM(cache_creation_tokens),0) AS cache_creation,
+               COALESCE(SUM(reasoning_tokens),0) AS reasoning
         FROM usage_events
+        WHERE {where}
         GROUP BY provider, model
         ORDER BY cost DESC
-        """
+        """,
+        params,
     )
 
 
-def by_project(db: Database, limit: int = 30) -> list[dict]:
+def by_project(
+    db: Database, tz: str, days: int | None = None, limit: int = 30
+) -> list[dict]:
+    where, params = _since(tz, days)
     return db.query_dicts(
         f"""
         SELECT COALESCE(project, '(none)') AS project, provider,
@@ -137,15 +172,19 @@ def by_project(db: Database, limit: int = 30) -> list[dict]:
                COALESCE(SUM(cost_usd),0) AS cost,
                MAX(ts) AS last_ts
         FROM usage_events
+        WHERE {where}
         GROUP BY project, provider
         ORDER BY cost DESC
         LIMIT ?
         """,
-        [limit],
+        [*params, limit],
     )
 
 
-def top_sessions(db: Database, limit: int = 25) -> list[dict]:
+def top_sessions(
+    db: Database, tz: str, days: int | None = None, limit: int = 25
+) -> list[dict]:
+    where, params = _since(tz, days)
     return db.query_dicts(
         f"""
         SELECT session_id, ANY_VALUE(provider) AS provider,
@@ -155,17 +194,20 @@ def top_sessions(db: Database, limit: int = 25) -> list[dict]:
                COALESCE(SUM(cost_usd),0) AS cost,
                MIN(ts) AS first_ts, MAX(ts) AS last_ts
         FROM usage_events
-        WHERE session_id IS NOT NULL
+        WHERE session_id IS NOT NULL AND {where}
         GROUP BY session_id
         ORDER BY cost DESC
         LIMIT ?
         """,
-        [limit],
+        [*params, limit],
     )
 
 
-def top_turns(db: Database, limit: int = 25) -> list[dict]:
+def top_turns(
+    db: Database, tz: str, days: int | None = None, limit: int = 25
+) -> list[dict]:
     """Most expensive single requests — the 'where did the burn go' view."""
+    where, params = _since(tz, days)
     return db.query_dicts(
         f"""
         SELECT provider, model, project, session_id, ts,
@@ -173,11 +215,51 @@ def top_turns(db: Database, limit: int = 25) -> list[dict]:
                cache_read_tokens AS cache_read, cache_creation_tokens AS cache_creation,
                {TOK} AS tokens, cost_usd AS cost
         FROM usage_events
+        WHERE {where}
         ORDER BY cost_usd DESC
         LIMIT ?
         """,
-        [limit],
+        [*params, limit],
     )
+
+
+def unpriced_models(db: Database, pricing: Pricing) -> list[dict]:
+    """Models with real usage whose resolved rate is all-zero — every $ figure on
+    the page silently undercounts while any of these exist."""
+    rows = db.query_dicts(
+        f"SELECT provider, model, COALESCE(SUM({TOK}),0) AS tokens "
+        "FROM usage_events GROUP BY provider, model ORDER BY tokens DESC"
+    )
+    return [
+        {"provider": r["provider"], "model": r["model"], "tokens": r["tokens"]}
+        for r in rows
+        if (r["tokens"] or 0) > 0 and pricing.is_unpriced(r["provider"], r["model"])
+    ]
+
+
+def cache_savings(
+    db: Database, pricing: Pricing, tz: str, days: int | None = None
+) -> float:
+    """Notional $ saved by prompt caching vs billing the same tokens uncached:
+    reads billed at cache_read instead of input, minus the write-tier premium."""
+    where, params = _since(tz, days)
+    rows = db.query_dicts(
+        "SELECT provider, model, "
+        "COALESCE(SUM(cache_read_tokens),0) AS cr, "
+        "COALESCE(SUM(cache_create_5m),0) AS c5, "
+        "COALESCE(SUM(cache_create_1h),0) AS c1 "
+        f"FROM usage_events WHERE {where} GROUP BY provider, model",
+        params,
+    )
+    total = 0.0
+    for r in rows:
+        rate = pricing.rate(pricing_key(r["provider"], r["model"]), r["model"])
+        total += (
+            r["cr"] * (rate.input - rate.cache_read)
+            - r["c5"] * (rate.cache_write_5m - rate.input)
+            - r["c1"] * (rate.cache_write_1h - rate.input)
+        )
+    return total / PER_TOKEN
 
 
 def burn(db: Database, tz: str, limit_5h: int | None, limit_week: int | None) -> dict:

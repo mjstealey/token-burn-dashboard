@@ -113,7 +113,9 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command")
 
     p_serve = sub.add_parser("serve", help="Run the web dashboard")
-    p_serve.add_argument("--host", default="0.0.0.0")
+    # Loopback by default: this reads your private usage logs, so don't expose it
+    # on the LAN unless asked (Docker's entrypoint passes --host 0.0.0.0 itself).
+    p_serve.add_argument("--host", default="127.0.0.1")
     p_serve.add_argument("--port", type=int, default=None)
     p_serve.set_defaults(func=_cmd_serve)
 

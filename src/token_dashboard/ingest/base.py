@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Iterable
 
 from ..db import Database
-from ..pricing import Pricing, UsageBreakdown
+from ..pricing import Pricing, UsageBreakdown, pricing_key
 
 _INGEST_LOCK = threading.Lock()
 _PRICING_HASH_KEY = "pricing_hash"
@@ -103,12 +103,6 @@ _INSERT = (
 )
 
 
-def _pricing_key(provider: str, model: str | None) -> str:
-    if provider == "claude":
-        return "anthropic" if (model or "").startswith("claude") else "local"
-    return provider
-
-
 def _cost_for_usage(
     pricing: Pricing,
     provider: str,
@@ -120,7 +114,7 @@ def _cost_for_usage(
     cache_create_1h: int,
 ) -> float:
     return pricing.cost(
-        _pricing_key(provider, model),
+        pricing_key(provider, model),
         model,
         UsageBreakdown(
             input_tokens=input_tokens,
@@ -177,7 +171,9 @@ def _file_state(db: Database, source_file: str) -> tuple[int, float, int] | None
 
 
 def _metadata_value(db: Database, key: str) -> str | None:
-    row = db.con.execute("SELECT value FROM app_metadata WHERE key = ?", [key]).fetchone()
+    row = db.con.execute(
+        "SELECT value FROM app_metadata WHERE key = ?", [key]
+    ).fetchone()
     return row[0] if row else None
 
 

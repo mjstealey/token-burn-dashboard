@@ -3,8 +3,10 @@
 
 const state = { metric: "cost", days: 365 };
 const heatmapCharts = {}; // panel key ("combined"|"claude"|"openai"...) -> ECharts instance
+const heatmapDayIndex = {}; // panel key -> { "2026-06-18": dataIndex } for cross-panel hover
 let lineChart = null;
 let lastHeatmap = null; // last /api/heatmap payload, kept so toggles re-render without refetch
+let lastHeatmapSig = null; // render signature; unchanged 60s polls skip the re-render
 let seriesEnabled = loadEnabledPanels(); // { key: bool } or null until first load fills it
 
 // Distinct base hue per series so each provider — and the combined total — reads as
@@ -71,11 +73,19 @@ function saveEnabledPanels() {
 }
 
 /* ---------- formatting ---------- */
+// Model names, project paths, and session ids come from local log files (a cwd can
+// contain quotes or angle brackets) — escape everything log-derived before innerHTML.
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+  ));
+}
 function fmtMoney(v) {
   v = v || 0;
   if (v >= 1000) return "$" + v.toLocaleString(undefined, { maximumFractionDigits: 0 });
   if (v >= 1) return "$" + v.toFixed(2);
-  return "$" + v.toFixed(3);
+  if (v >= 0.001 || v === 0) return "$" + v.toFixed(3);
+  return "$" + v.toPrecision(2); // sub-tenth-of-a-cent bucket edges stay distinguishable
 }
 function fmtTokens(v) {
   v = v || 0;
@@ -91,10 +101,22 @@ function localTime(s) {
   if (!s) return "—";
   try { return new Date(s).toLocaleString(); } catch { return s; }
 }
+function localDate(s) {
+  if (!s) return "—";
+  try { return new Date(s).toLocaleDateString(); } catch { return s; }
+}
+function weekday(day) {
+  try { return new Date(day + "T00:00:00").toLocaleDateString(undefined, { weekday: "short" }); }
+  catch { return ""; }
+}
 function dateAdd(iso, delta) {
   const d = new Date(iso + "T00:00:00Z");
   d.setUTCDate(d.getUTCDate() + delta);
   return d.toISOString().slice(0, 10);
+}
+function rangeLabel() {
+  return { 30: "last 30 days", 90: "last 90 days", 180: "last 180 days", 365: "last 365 days" }[state.days]
+    || `last ${state.days} days`;
 }
 
 async function getJSON(url) {
@@ -104,17 +126,27 @@ async function getJSON(url) {
 }
 
 /* ---------- KPIs / freshness ---------- */
+// Period-over-period delta against the previous window of the same length.
+function deltaLine(cur, prev) {
+  if (!prev || !(prev.cost > 0)) return "";
+  const d = ((cur.cost || 0) - prev.cost) / prev.cost;
+  const sign = d >= 0 ? "+" : "−";
+  return `<div class="delta">${sign}${Math.abs(d * 100).toFixed(0)}% vs prior ${fmtMoney(prev.cost)}</div>`;
+}
+
 async function loadSummary() {
   const s = await getJSON("/api/summary");
   const cards = [
-    ["Today", s.today], ["7 days", s.last_7d], ["30 days", s.last_30d], ["All time", s.all_time],
+    ["Today", s.today, null], ["7 days", s.last_7d, s.prev_7d],
+    ["30 days", s.last_30d, s.prev_30d], ["All time", s.all_time, null],
   ];
   document.getElementById("kpis").innerHTML = cards
-    .map(([label, w]) => `
+    .map(([label, w, prev]) => `
       <div class="kpi">
         <div class="label">${label}</div>
         <div class="big">${fmtMoney(w.cost)}</div>
         <div class="small">${fmtTokens(w.tokens)} tok · ${(w.events || 0).toLocaleString()} req</div>
+        ${deltaLine(w, prev)}
       </div>`)
     .join("");
 
@@ -122,6 +154,19 @@ async function loadSummary() {
   const ing = s.last_ingest_at ? localTime(s.last_ingest_at) : "—";
   document.getElementById("freshness").textContent =
     `Latest activity ${last} · last ingest ${ing} · timezone ${s.timezone}`;
+
+  // Models with usage but an all-zero rate mean every $ on the page undercounts.
+  const warn = document.getElementById("warnings");
+  const unpriced = s.unpriced_models || [];
+  if (unpriced.length) {
+    warn.hidden = false;
+    warn.textContent = "⚠ no pricing.yaml rate for " +
+      unpriced.map((m) => `${m.model || "(unknown)"} (${fmtTokens(m.tokens)} tok)`).join(", ") +
+      " — $ figures undercount until rates are added";
+  } else {
+    warn.hidden = true;
+    warn.textContent = "";
+  }
 
   // Providers table.
   const provs = s.providers || [];
@@ -147,26 +192,35 @@ function providerColors(p) {
 function providerPill(p) {
   const name = p === "openai" ? "Codex" : p === "claude" ? "Claude" : p === "local" ? "Local" : p;
   const c = providerColors(p);
-  return `<span class="pill" style="background:${c.bg};color:${c.fg}">${name}</span>`;
+  return `<span class="pill" style="background:${c.bg};color:${c.fg}">${esc(name)}</span>`;
 }
 
 /* ---------- heat map ---------- */
-function buckets(max, ramp) {
-  if (!(max > 0)) return [{ lte: 0, color: ramp[0] }];
+// Log-spaced buckets from the panel max. Only the end buckets carry text labels —
+// the middle swatches show the ramp; exact values live in the tooltip.
+function buckets(max, ramp, fmt) {
+  if (!(max > 0)) return [{ lte: 0, color: ramp[0], label: "0" }];
   const th = [];
   let v = max;
   for (let i = 0; i < ramp.length - 1; i++) { th.unshift(v); v = v / 3; } // geometric (log-ish)
-  const pieces = [{ lt: th[0], color: ramp[0] }];
-  for (let i = 0; i < th.length - 1; i++) pieces.push({ gte: th[i], lt: th[i + 1], color: ramp[i + 1] });
-  pieces.push({ gte: th[th.length - 1], color: ramp[ramp.length - 1] });
+  const pieces = [{ lt: th[0], color: ramp[0], label: "< " + fmt(th[0]) }];
+  for (let i = 0; i < th.length - 1; i++) {
+    pieces.push({ gte: th[i], lt: th[i + 1], color: ramp[i + 1], label: " " });
+  }
+  pieces.push({ gte: th[th.length - 1], color: ramp[ramp.length - 1], label: "≥ " + fmt(th[th.length - 1]) });
   return pieces;
 }
 
 async function loadHeatmap() {
   const data = await getJSON(`/api/heatmap?days=${state.days}&metric=${state.metric}`);
   lastHeatmap = data;
+  // Skip the re-render when nothing changed (60s poll) — a full setOption redraw
+  // closes any open tooltip and flickers the canvas.
+  const sig = JSON.stringify([data.combined, data.providers, state.metric, state.days, currentTheme()]);
+  if (sig === lastHeatmapSig && Object.keys(heatmapCharts).length) return;
+  lastHeatmapSig = sig;
   document.getElementById("heatmap-note").textContent =
-    `color = daily ${state.metric === "cost" ? "$" : "tokens"} · each panel scaled to its own range · hover for detail`;
+    `color = daily ${state.metric === "cost" ? "$" : "tokens"} · totals & scale = ${rangeLabel()} per panel · hover for detail`;
   renderSeriesToggle(data);
   renderHeatmaps(data);
   renderLine(data.combined || data.series || []);
@@ -187,8 +241,8 @@ function renderSeriesToggle(data) {
   host.innerHTML = keys.map((k) => {
     const on = seriesEnabled[k] !== false;
     const dot = on ? ` style="background:${seriesColor(k)}"` : "";
-    return `<button data-key="${k}" class="${on ? "on" : ""}" aria-pressed="${on}">` +
-      `<span class="dot"${dot}></span>${seriesLabel(k)}</button>`;
+    return `<button data-key="${esc(k)}" class="${on ? "on" : ""}" aria-pressed="${on}">` +
+      `<span class="dot"${dot}></span>${esc(seriesLabel(k))}</button>`;
   }).join("");
 
   host.querySelectorAll("button").forEach((btn) => {
@@ -213,6 +267,7 @@ function renderHeatmaps(data) {
     const k = panel.dataset.key;
     if (!keys.includes(k) || seriesEnabled[k] === false) {
       if (heatmapCharts[k]) { heatmapCharts[k].dispose(); delete heatmapCharts[k]; }
+      delete heatmapDayIndex[k];
       panel.remove();
     }
   });
@@ -231,9 +286,9 @@ function renderHeatmaps(data) {
       panel.className = "heatmap-panel";
       panel.dataset.key = k;
       panel.innerHTML =
-        `<div class="heatmap-label"><span class="name">${seriesLabel(k)}</span>` +
-        `<span class="note panel-stat" id="stat-${k}"></span></div>` +
-        `<div class="chart heatmap-chart" id="hm-${k}"></div>`;
+        `<div class="heatmap-label"><span class="name">${esc(seriesLabel(k))}</span>` +
+        `<span class="note panel-stat" id="stat-${esc(k)}"></span></div>` +
+        `<div class="chart heatmap-chart" id="hm-${esc(k)}"></div>`;
     }
     host.appendChild(panel);
   });
@@ -244,15 +299,39 @@ function renderHeatmaps(data) {
   });
 }
 
+// The panels share a date window, so hovering a day in one highlights the same day
+// in the others — that's the comparison the aligned calendars exist for.
+function wireHoverSync(key, chart) {
+  if (chart.__hoverSynced) return;
+  chart.__hoverSynced = true;
+  chart.on("mouseover", (p) => {
+    if (!p || !p.data || !p.data.raw) return;
+    const day = p.data.raw.day;
+    Object.entries(heatmapCharts).forEach(([k, c]) => {
+      if (k === key) return;
+      const idx = (heatmapDayIndex[k] || {})[day];
+      if (idx != null) c.dispatchAction({ type: "showTip", seriesIndex: 0, dataIndex: idx });
+      else c.dispatchAction({ type: "hideTip" });
+    });
+  });
+  chart.on("globalout", () => {
+    Object.entries(heatmapCharts).forEach(([k, c]) => {
+      if (k !== key) c.dispatchAction({ type: "hideTip" });
+    });
+  });
+}
+
 function renderHeatmapInto(key, series) {
   const el = document.getElementById(`hm-${key}`);
   if (!el) return;
   let chart = heatmapCharts[key];
   if (!chart) { chart = echarts.init(el, null, { renderer: "canvas" }); heatmapCharts[key] = chart; }
+  wireHoverSync(key, chart);
 
   const statEl = document.getElementById(`stat-${key}`);
   if (!series.length) {
     chart.clear();
+    heatmapDayIndex[key] = {};
     if (statEl) statEl.textContent = "no activity in range";
     return;
   }
@@ -263,6 +342,7 @@ function renderHeatmapInto(key, series) {
   }
 
   const cells = series.map((d) => ({ value: [d.day, metricVal(d)], raw: d }));
+  heatmapDayIndex[key] = Object.fromEntries(series.map((d, i) => [d.day, i]));
   const maxV = Math.max(...series.map(metricVal));
   // All panels share the same date window (combined's latest day) so they line up.
   const all = (lastHeatmap && lastHeatmap.combined && lastHeatmap.combined.length)
@@ -280,7 +360,7 @@ function renderHeatmapInto(key, series) {
       textStyle: { color: ink, fontSize: 12 },
       formatter: (p) => {
         const d = p.data.raw;
-        return `<b>${d.day}</b><br/>` +
+        return `<b>${weekday(d.day)} ${d.day}</b><br/>` +
           `${fmtMoney(d.cost)} · ${fmtTokens(d.tokens)} tok<br/>` +
           `<span style="color:${muted}">in ${fmtTokens(d.input)} · out ${fmtTokens(d.output)} · ` +
           `cache rd ${fmtTokens(d.cache_read)} · cache wr ${fmtTokens(d.cache_creation)}</span>`;
@@ -288,19 +368,14 @@ function renderHeatmapInto(key, series) {
     },
     visualMap: {
       type: "piecewise",
-      pieces: buckets(maxV, rampFor(key)),
+      pieces: buckets(maxV, rampFor(key), fmtMetric),
       orient: "horizontal",
       left: "center",
       bottom: 0,
       itemWidth: 12,
       itemHeight: 12,
+      itemGap: 4,
       textStyle: { color: muted, fontSize: 10 },
-      formatter: (a, b) => {
-        const f = state.metric === "cost" ? (x) => fmtMoney(x) : (x) => fmtTokens(x);
-        if (a === -Infinity || a == null) return "< " + f(b);
-        if (b === Infinity || b == null) return "≥ " + f(a);
-        return f(a) + "–" + f(b);
-      },
     },
     calendar: {
       top: 20,
@@ -376,7 +451,10 @@ async function loadBurn() {
   rows.push(plainRow("30-day forecast",
     fmtTokens(b.forecast_30d.tokens) + " · " + fmtMoney(b.forecast_30d.cost)));
   if (b.block_5h.hours_to_limit != null) {
-    rows.push(plainRow("Time to 5h limit", b.block_5h.hours_to_limit.toFixed(1) + " h"));
+    // An estimate, not a promise: trailing-5h consumption at the trailing-24h rate.
+    const h = b.block_5h.hours_to_limit;
+    rows.push(plainRow("Time to 5h limit",
+      h > 24 ? "> 24 h at 24h-avg rate" : `≈ ${h.toFixed(1)} h at 24h-avg rate`));
   }
   document.getElementById("burn").innerHTML = rows.join("");
 }
@@ -408,52 +486,67 @@ function miniBar(frac, color) {
 }
 
 async function loadModels() {
-  const { models } = await getJSON("/api/models");
+  const data = await getJSON(`/api/models?days=${state.days}`);
+  const models = data.models || [];
+  const savings = data.cache_savings || 0;
+  document.getElementById("models-note").textContent =
+    `$ and cache efficiency · ${rangeLabel()}` +
+    (savings >= 0.01 ? ` · caching saved ≈ ${fmtMoney(savings)}` : "");
   if (!models.length) { document.getElementById("models").innerHTML = `<p class="empty">No data yet.</p>`; return; }
   const rows = models.map((m) => {
     const inputSide = (m.input || 0) + (m.cache_read || 0) + (m.cache_creation || 0);
     const eff = inputSide ? (m.cache_read || 0) / inputSide : 0;
+    const reasoning = m.reasoning && m.output ? pct(m.reasoning / m.output) : `<span class="dim">—</span>`;
     return [
-      providerPill(m.provider) + " <span class='mono'>" + (m.model || "(unknown)") + "</span>",
+      providerPill(m.provider) + " <span class='mono'>" + esc(m.model || "(unknown)") + "</span>",
       fmtTokens(m.tokens), fmtMoney(m.cost),
-      miniBar(eff, seriesColor(m.provider)) + " " + pct(eff), (m.events || 0).toLocaleString(),
+      miniBar(eff, seriesColor(m.provider)) + " " + pct(eff),
+      reasoning, (m.events || 0).toLocaleString(),
     ];
   });
   document.getElementById("models").innerHTML =
-    table(["Model", "Tokens", "$", "Cache hit", "Req"], rows);
+    table(["Model", "Tokens", "$", "Cache hit", "Reasoning", "Req"], rows);
 }
 
 async function loadProjects() {
-  const { projects } = await getJSON("/api/projects");
+  const { projects } = await getJSON(`/api/projects?days=${state.days}`);
+  document.getElementById("projects-note").textContent = `by directory · ${rangeLabel()}`;
   if (!projects.length) { document.getElementById("projects").innerHTML = `<p class="empty">No data yet.</p>`; return; }
   const rows = projects.map((p) => [
-    `<span class="mono" title="${p.project}">${shortPath(p.project)}</span>`,
+    providerPill(p.provider) +
+      ` <span class="mono" title="${esc(p.project)}">${esc(shortPath(p.project))}</span>`,
     fmtMoney(p.cost), fmtTokens(p.tokens), p.sessions,
   ]);
   document.getElementById("projects").innerHTML = table(["Project", "$", "Tokens", "Sess"], rows);
 }
 
 async function loadSessions() {
-  const { sessions } = await getJSON("/api/sessions");
+  const { sessions } = await getJSON(`/api/sessions?days=${state.days}`);
+  document.getElementById("sessions-note").textContent = `most expensive · ${rangeLabel()}`;
   if (!sessions.length) { document.getElementById("sessions").innerHTML = `<p class="empty">No data yet.</p>`; return; }
   const rows = sessions.map((s) => [
-    `<span class="mono" title="${s.session_id}">${(s.session_id || "").slice(0, 8)}</span> ` +
-      `<span class="dim">${shortPath(s.project)}</span>`,
+    `<span class="mono" title="${esc(s.session_id)}">${esc((s.session_id || "").slice(0, 8))}</span> ` +
+      `<span class="dim" title="${esc(s.project)}">${esc(shortPath(s.project))}</span>`,
     fmtMoney(s.cost), fmtTokens(s.tokens), s.turns,
+    `<span class="dim">${localDate(s.last_ts)}</span>`,
   ]);
-  document.getElementById("sessions").innerHTML = table(["Session", "$", "Tokens", "Turns"], rows);
+  document.getElementById("sessions").innerHTML =
+    table(["Session", "$", "Tokens", "Turns", "When"], rows);
 }
 
 async function loadTurns() {
-  const { turns } = await getJSON("/api/turns");
+  const { turns } = await getJSON(`/api/turns?days=${state.days}`);
+  document.getElementById("turns-note").textContent = `where the burn went · ${rangeLabel()}`;
   if (!turns.length) { document.getElementById("turns").innerHTML = `<p class="empty">No data yet.</p>`; return; }
   const rows = turns.map((t) => [
-    providerPill(t.provider) + " <span class='mono'>" + (t.model || "") + "</span>",
+    providerPill(t.provider) + " <span class='mono'>" + esc(t.model || "") + "</span>",
+    `<span class="dim" title="${esc(t.project)}">${esc(shortPath(t.project))}</span>`,
     fmtMoney(t.cost),
     `<span class="dim">in ${fmtTokens(t.input)} · out ${fmtTokens(t.output)} · rd ${fmtTokens(t.cache_read)} · wr ${fmtTokens(t.cache_creation)}</span>`,
     `<span class="dim">${localTime(t.ts)}</span>`,
   ]);
-  document.getElementById("turns").innerHTML = table(["Model", "$", "Tokens", "When"], rows);
+  document.getElementById("turns").innerHTML =
+    table(["Model", "Project", "$", "Tokens", "When"], rows);
 }
 
 function shortPath(p) {
@@ -463,21 +556,38 @@ function shortPath(p) {
 }
 
 /* ---------- wiring ---------- */
-function loadAll() {
-  return Promise.all([
-    loadSummary(), loadHeatmap(), loadBurn(),
-    loadModels(), loadProjects(), loadSessions(), loadTurns(),
-  ]).catch((e) => console.error(e));
+// Surface fetch failures in the freshness line instead of only the console —
+// otherwise a dead server leaves stale panels that look current.
+function withErrorState(p) {
+  return p
+    .then(() => { document.getElementById("freshness").classList.remove("error"); })
+    .catch((e) => {
+      console.error(e);
+      const f = document.getElementById("freshness");
+      f.classList.add("error");
+      f.textContent = "⚠ couldn't reach the server — showing last loaded data";
+    });
 }
 
-function wireToggle(id, key, cast) {
+function loadAll() {
+  return withErrorState(Promise.all([
+    loadSummary(), loadHeatmap(), loadBurn(),
+    loadModels(), loadProjects(), loadSessions(), loadTurns(),
+  ]));
+}
+function loadRangeScoped() {
+  return withErrorState(Promise.all([
+    loadHeatmap(), loadModels(), loadProjects(), loadSessions(), loadTurns(),
+  ]));
+}
+
+function wireToggle(id, key, cast, onChange) {
   document.querySelectorAll(`#${id} button`).forEach((btn) => {
     btn.addEventListener("click", () => {
       document.querySelectorAll(`#${id} button`).forEach((b) => b.classList.remove("on"));
       btn.classList.add("on");
       state[key] = cast(btn.dataset[key]);
-      if (key === "metric") loadHeatmap();
-      else loadHeatmap();
+      onChange();
     });
   });
 }
@@ -485,19 +595,33 @@ function wireToggle(id, key, cast) {
 document.addEventListener("DOMContentLoaded", () => {
   applyTheme(currentTheme()); // sync the toggle button to the attribute set in <head>
   document.getElementById("theme-toggle").addEventListener("click", toggleTheme);
-  wireToggle("metric-toggle", "metric", (v) => v);
-  wireToggle("range-toggle", "days", (v) => parseInt(v, 10));
+  wireToggle("metric-toggle", "metric", (v) => v, () => withErrorState(loadHeatmap()));
+  wireToggle("range-toggle", "days", (v) => parseInt(v, 10), loadRangeScoped);
   document.getElementById("refresh").addEventListener("click", async (e) => {
-    e.target.disabled = true;
-    e.target.textContent = "↻ ingesting…";
-    try { await fetch("/api/ingest", { method: "POST" }); await loadAll(); }
-    finally { e.target.disabled = false; e.target.textContent = "↻ refresh"; }
+    const btn = e.target;
+    btn.disabled = true;
+    btn.textContent = "↻ ingesting…";
+    try {
+      const r = await fetch("/api/ingest", { method: "POST" });
+      if (!r.ok) throw new Error("ingest failed: " + r.status);
+      await loadAll();
+      btn.textContent = "↻ refresh";
+    } catch (err) {
+      console.error(err);
+      btn.textContent = "⚠ refresh failed";
+      setTimeout(() => { btn.textContent = "↻ refresh"; }, 4000);
+    } finally {
+      btn.disabled = false;
+    }
   });
   loadAll();
   window.addEventListener("resize", () => {
     Object.values(heatmapCharts).forEach((c) => c.resize());
     if (lineChart) lineChart.resize();
   });
-  // Lightweight polling so the dashboard stays current while open.
-  setInterval(() => { loadSummary(); loadHeatmap(); loadBurn(); }, 60000);
+  // Lightweight polling so the dashboard stays current while open. Unchanged
+  // heat-map payloads skip the re-render (see loadHeatmap).
+  setInterval(() => {
+    withErrorState(Promise.all([loadSummary(), loadHeatmap(), loadBurn()]));
+  }, 60000);
 });
