@@ -1,6 +1,6 @@
 # Token pricing, USD per MILLION tokens. Edit freely — this is the source of truth
 # for $ cost. Re-verify against vendor pricing pages periodically; model lineups
-# churn. Snapshot date: 2026-06-19.
+# churn. Snapshot date: 2026-08-05.
 #
 # Rate fields (all per 1M tokens):
 #   input            base (uncached) input
@@ -18,10 +18,13 @@ anthropic:
   models:
     claude-fable-5:    { input: 10.00, cache_write_5m: 12.50, cache_write_1h: 20.00, cache_read: 1.00, output: 50.00 }
     claude-mythos-5:   { input: 10.00, cache_write_5m: 12.50, cache_write_1h: 20.00, cache_read: 1.00, output: 50.00 }
+    claude-opus-5:     { input: 5.00,  cache_write_5m: 6.25,  cache_write_1h: 10.00, cache_read: 0.50, output: 25.00 }
     claude-opus-4-8:   { input: 5.00,  cache_write_5m: 6.25,  cache_write_1h: 10.00, cache_read: 0.50, output: 25.00 }
     claude-opus-4-7:   { input: 5.00,  cache_write_5m: 6.25,  cache_write_1h: 10.00, cache_read: 0.50, output: 25.00 }
     claude-opus-4-6:   { input: 5.00,  cache_write_5m: 6.25,  cache_write_1h: 10.00, cache_read: 0.50, output: 25.00 }
     claude-opus-4-5:   { input: 5.00,  cache_write_5m: 6.25,  cache_write_1h: 10.00, cache_read: 0.50, output: 25.00 }
+    # sonnet-5 standard rate; intro pricing ($2/$10) applies through 2026-08-31
+    claude-sonnet-5:   { input: 3.00,  cache_write_5m: 3.75,  cache_write_1h: 6.00,  cache_read: 0.30, output: 15.00 }
     claude-sonnet-4-6: { input: 3.00,  cache_write_5m: 3.75,  cache_write_1h: 6.00,  cache_read: 0.30, output: 15.00 }
     claude-sonnet-4-5: { input: 3.00,  cache_write_5m: 3.75,  cache_write_1h: 6.00,  cache_read: 0.30, output: 15.00 }
     claude-haiku-4-5:  { input: 1.00,  cache_write_5m: 1.25,  cache_write_1h: 2.00,  cache_read: 0.10, output: 5.00 }
@@ -30,6 +33,10 @@ anthropic:
 openai:
   default: { input: 1.75, cache_write_5m: 0.0, cache_write_1h: 0.0, cache_read: 0.175, output: 14.00 }
   models:
+    # GPT-5.6 family (Terra/Luna rates reflect the 2026-07-30 price cut)
+    gpt-5.6-sol:   { input: 5.00, cache_read: 0.50,  output: 30.00 }
+    gpt-5.6-terra: { input: 2.00, cache_read: 0.20,  output: 12.00 }
+    gpt-5.6-luna:  { input: 0.20, cache_read: 0.02,  output: 1.20 }
     gpt-5.3-codex: { input: 1.75, cache_read: 0.175, output: 14.00 }
     gpt-5.5:       { input: 5.00, cache_read: 0.50,  output: 30.00 }
     gpt-5.5-pro:   { input: 30.00, cache_read: 0.0,  output: 180.00 }
