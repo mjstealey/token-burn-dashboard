@@ -12,7 +12,8 @@ Package `token_dashboard` under `src/`; `uv` for envs/installs/running.
 - `uv run token-dashboard serve` — ingest on boot, serve on :8080
 - `uv run token-dashboard ingest` — one ingest pass, exit (routes to a running server if up)
 - `uv run token-dashboard reprice [--force]` — recompute stored costs from current `pricing.yaml`
-- `uv run pytest` — test suite
+- `uv run pytest` — Python test suite
+- `node --test tests/frontend.test.cjs` — frontend regression tests
 - `docker compose up --build` — mounts `~/.claude` + `~/.codex` read-only, DB in `./data`
 
 ## Conventions
@@ -26,7 +27,7 @@ Package `token_dashboard` under `src/`; `uv` for envs/installs/running.
   `app_metadata`; ingest/refresh reprices existing rows only when that hash changes.
 
 ## Gotchas
-- Single-writer DB: one process owns all DuckDB writes, serialized by `_INGEST_LOCK` +
+- Single-writer DB: one process owns all DuckDB writes, serialized by `AppState.operation_lock`, `_INGEST_LOCK`, and
   `db.lock`. Don't open a second writer or move writes off the scheduler; the CLI
   `ingest`/`reprice` POST to a running server rather than opening a second connection.
 - Claude repeats the same usage payload across sibling JSONL lines — collapse to one row

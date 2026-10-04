@@ -23,3 +23,13 @@ def db() -> Database:
 
 def write_jsonl(path: Path, records: list[dict]) -> None:
     path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+
+
+@pytest.fixture(autouse=True)
+def fixed_metrics_clock(monkeypatch):
+    import datetime as dt
+    from token_dashboard import metrics
+
+    instant = dt.datetime(2026, 6, 20, 12, tzinfo=dt.timezone.utc)
+    monkeypatch.setattr(metrics, "now_utc", lambda: instant)
+    return instant

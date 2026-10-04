@@ -120,10 +120,12 @@ function rangeLabel() {
     || `last ${state.days} days`;
 }
 
-async function getJSON(url) {
-  const r = await fetch(url);
+async function getJSON(url, context) {
+  const r = await fetch(url, { signal: context.signal });
   if (!r.ok) throw new Error(url + " -> " + r.status);
-  return r.json();
+  const data = await r.json();
+  if (context.signal.aborted) throw new DOMException("Superseded refresh", "AbortError");
+  return data;
 }
 
 /* ---------- KPIs / freshness ---------- */
@@ -135,8 +137,8 @@ function deltaLine(cur, prev) {
   return `<div class="delta">${sign}${Math.abs(d * 100).toFixed(0)}% vs prior ${fmtMoney(prev.cost)}</div>`;
 }
 
-async function loadSummary() {
-  const s = await getJSON("/api/summary");
+async function loadSummary(context) {
+  const s = await getJSON("/api/summary", context);
   const cards = [
     ["Today", s.today, null], ["7 days", s.last_7d, s.prev_7d],
     ["30 days", s.last_30d, s.prev_30d], ["All time", s.all_time, null],
@@ -159,15 +161,17 @@ async function loadSummary() {
   // Models with usage but an all-zero rate mean every $ on the page undercounts.
   const warn = document.getElementById("warnings");
   const unpriced = s.unpriced_models || [];
+  const failures = Object.values(s.last_ingest || {}).reduce((n, v) => n + (v.files_failed || 0), 0);
+  const messages = [];
+  if (failures) messages.push(`⚠ ${failures} log file(s) failed to ingest; totals may be incomplete`);
+  if (s.last_error) messages.push("⚠ latest ingest failed; showing previously ingested data");
   if (unpriced.length) {
-    warn.hidden = false;
-    warn.textContent = "⚠ no pricing.yaml rate for " +
+    messages.push("⚠ no pricing.yaml rate for " +
       unpriced.map((m) => `${m.model || "(unknown)"} (${fmtTokens(m.tokens)} tok)`).join(", ") +
-      " — $ figures undercount until rates are added";
-  } else {
-    warn.hidden = true;
-    warn.textContent = "";
+      " — $ figures undercount until rates are added");
   }
+  warn.hidden = messages.length === 0;
+  warn.textContent = messages.join(" · ");
 
   // Providers table.
   const provs = s.providers || [];
@@ -216,12 +220,12 @@ function filterQuery() {
   return state.filter ? `&${state.filter.type}=${encodeURIComponent(state.filter.value)}` : "";
 }
 
-async function loadHeatmap() {
-  const data = await getJSON(`/api/heatmap?days=${state.days}&metric=${state.metric}${filterQuery()}`);
+async function loadHeatmap(context) {
+  const data = await getJSON(`/api/heatmap?days=${state.days}&metric=${state.metric}${filterQuery()}`, context);
   lastHeatmap = data;
   // Skip the re-render when nothing changed (60s poll) — a full setOption redraw
   // closes any open tooltip and flickers the canvas.
-  const sig = JSON.stringify([data.combined, data.providers, state.metric, state.days, state.filter, currentTheme()]);
+  const sig = JSON.stringify([data.start_day, data.end_day, data.combined, data.providers, state.metric, state.days, state.filter, currentTheme()]);
   if (sig === lastHeatmapSig && Object.keys(heatmapCharts).length) return;
   lastHeatmapSig = sig;
   document.getElementById("heatmap-note").textContent =
@@ -247,7 +251,7 @@ function renderFilterChip() {
 function setFilter(f) {
   state.filter = f;
   updateFilteredRows();
-  withErrorState(Promise.all([loadHeatmap(), loadPunchcard()]));
+  loadAll();
 }
 
 // Keep row highlighting in sync without re-fetching the tables.
@@ -396,11 +400,9 @@ function renderHeatmapInto(key, series) {
   const cells = series.map((d) => ({ value: [d.day, metricVal(d)], raw: d }));
   heatmapDayIndex[key] = Object.fromEntries(series.map((d, i) => [d.day, i]));
   const maxV = Math.max(...series.map(metricVal));
-  // All panels share the same date window (combined's latest day) so they line up.
-  const all = (lastHeatmap && lastHeatmap.combined && lastHeatmap.combined.length)
-    ? lastHeatmap.combined : series;
-  const lastDay = all[all.length - 1].day;
-  const start = dateAdd(lastDay, -(state.days - 1));
+  // The API anchors every panel to today in the configured timezone.
+  const lastDay = lastHeatmap.end_day;
+  const start = lastHeatmap.start_day;
 
   const ink = cssVar("--ink"), muted = cssVar("--muted"), panel = cssVar("--panel"),
     rule = cssVar("--rule"), faint = cssVar("--faint"), bg = cssVar("--bg");
@@ -453,9 +455,11 @@ function renderLine(series) {
 
   const days = series.map((d) => d.day);
   const vals = series.map(metricVal);
-  // 7-day trailing moving average.
+  // Series contains every calendar day, including zeros. The first six
+  // points have insufficient history for a full seven-day average.
   const ma = vals.map((_, i) => {
-    const s = Math.max(0, i - 6);
+    if (i < 6) return null;
+    const s = i - 6;
     const w = vals.slice(s, i + 1);
     return w.reduce((a, b) => a + b, 0) / w.length;
   });
@@ -493,8 +497,8 @@ function renderLine(series) {
 /* ---------- punchcard ---------- */
 const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
-async function loadPunchcard() {
-  const { punchcard } = await getJSON(`/api/punchcard?days=${state.days}${filterQuery()}`);
+async function loadPunchcard(context) {
+  const { punchcard } = await getJSON(`/api/punchcard?days=${state.days}${filterQuery()}`, context);
   const filt = state.filter
     ? ` · only ${state.filter.type === "project" ? shortPath(state.filter.value) : state.filter.value}`
     : "";
@@ -573,8 +577,8 @@ function renderPunchcard(rows) {
 }
 
 /* ---------- burn ---------- */
-async function loadBurn() {
-  const b = await getJSON("/api/burn");
+async function loadBurn(context) {
+  const b = await getJSON("/api/burn", context);
   const rows = [];
   rows.push(burnRow("Last 5 hours", fmtTokens(b.block_5h.tokens) + " · " + fmtMoney(b.block_5h.cost),
     b.block_5h.utilization, b.block_5h.limit_tokens));
@@ -621,8 +625,8 @@ function miniBar(frac, color) {
   return `<span class="bartrack"><span class="bar" style="${style}"></span></span>`;
 }
 
-async function loadModels() {
-  const data = await getJSON(`/api/models?days=${state.days}`);
+async function loadModels(context) {
+  const data = await getJSON(`/api/models?days=${state.days}`, context);
   const models = data.models || [];
   const savings = data.cache_savings || 0;
   document.getElementById("models-note").textContent =
@@ -647,8 +651,8 @@ async function loadModels() {
   wireRowFilters("models");
 }
 
-async function loadProjects() {
-  const { projects } = await getJSON(`/api/projects?days=${state.days}`);
+async function loadProjects(context) {
+  const { projects } = await getJSON(`/api/projects?days=${state.days}`, context);
   document.getElementById("projects-note").textContent = `by directory · ${rangeLabel()}`;
   if (!projects.length) { document.getElementById("projects").innerHTML = `<p class="empty">No data yet.</p>`; return; }
   const rows = projects.map((p) => [
@@ -663,8 +667,8 @@ async function loadProjects() {
   wireRowFilters("projects");
 }
 
-async function loadSessions() {
-  const { sessions } = await getJSON(`/api/sessions?days=${state.days}`);
+async function loadSessions(context) {
+  const { sessions } = await getJSON(`/api/sessions?days=${state.days}`, context);
   document.getElementById("sessions-note").textContent = `most expensive · ${rangeLabel()}`;
   if (!sessions.length) { document.getElementById("sessions").innerHTML = `<p class="empty">No data yet.</p>`; return; }
   const rows = sessions.map((s) => [
@@ -677,8 +681,8 @@ async function loadSessions() {
     table(["Session", "$", "Tokens", "Turns", "When"], rows);
 }
 
-async function loadTurns() {
-  const { turns } = await getJSON(`/api/turns?days=${state.days}`);
+async function loadTurns(context) {
+  const { turns } = await getJSON(`/api/turns?days=${state.days}`, context);
   document.getElementById("turns-note").textContent = `where the burn went · ${rangeLabel()}`;
   if (!turns.length) { document.getElementById("turns").innerHTML = `<p class="empty">No data yet.</p>`; return; }
   const rows = turns.map((t) => [
@@ -699,30 +703,28 @@ function shortPath(p) {
 }
 
 /* ---------- wiring ---------- */
-// Surface fetch failures in the freshness line instead of only the console —
-// otherwise a dead server leaves stale panels that look current.
-function withErrorState(p) {
-  return p
-    .then(() => { document.getElementById("freshness").classList.remove("error"); })
-    .catch((e) => {
-      console.error(e);
-      const f = document.getElementById("freshness");
-      f.classList.add("error");
-      f.textContent = "⚠ couldn't reach the server — showing last loaded data";
-    });
-}
-
-function loadAll() {
-  return withErrorState(Promise.all([
-    loadSummary(), loadHeatmap(), loadPunchcard(), loadBurn(),
-    loadModels(), loadProjects(), loadSessions(), loadTurns(),
-  ]));
-}
-function loadRangeScoped() {
-  return withErrorState(Promise.all([
-    loadHeatmap(), loadPunchcard(),
-    loadModels(), loadProjects(), loadSessions(), loadTurns(),
-  ]));
+// A refresh owns every request. A new selection cancels the previous generation
+// so late responses cannot render against newer labels, filters, or theme state.
+let refreshController = null;
+let refreshGeneration = 0;
+async function loadAll() {
+  if (refreshController) refreshController.abort();
+  refreshController = new AbortController();
+  const context = { signal: refreshController.signal };
+  const generation = ++refreshGeneration;
+  const results = await Promise.allSettled([
+    loadSummary(context), loadHeatmap(context), loadPunchcard(context), loadBurn(context),
+    loadModels(context), loadProjects(context), loadSessions(context), loadTurns(context),
+  ]);
+  if (generation !== refreshGeneration) return true;
+  const failed = results.filter((r) => r.status === "rejected");
+  const freshness = document.getElementById("freshness");
+  freshness.classList.toggle("error", failed.length > 0);
+  if (failed.length) {
+    failed.forEach((r) => console.error(r.reason));
+    freshness.textContent = "⚠ some panels failed to refresh — showing last loaded data";
+  }
+  return failed.length === 0;
 }
 
 function wireToggle(id, key, cast, onChange) {
@@ -739,9 +741,8 @@ function wireToggle(id, key, cast, onChange) {
 document.addEventListener("DOMContentLoaded", () => {
   applyTheme(currentTheme()); // sync the toggle button to the attribute set in <head>
   document.getElementById("theme-toggle").addEventListener("click", toggleTheme);
-  wireToggle("metric-toggle", "metric", (v) => v,
-    () => withErrorState(Promise.all([loadHeatmap(), loadPunchcard()])));
-  wireToggle("range-toggle", "days", (v) => parseInt(v, 10), loadRangeScoped);
+  wireToggle("metric-toggle", "metric", (v) => v, loadAll);
+  wireToggle("range-toggle", "days", (v) => parseInt(v, 10), loadAll);
   document.getElementById("refresh").addEventListener("click", async (e) => {
     const btn = e.target;
     btn.disabled = true;
@@ -749,7 +750,7 @@ document.addEventListener("DOMContentLoaded", () => {
     try {
       const r = await fetch("/api/ingest", { method: "POST" });
       if (!r.ok) throw new Error("ingest failed: " + r.status);
-      await loadAll();
+      if (!await loadAll()) throw new Error("Panel refresh failed");
       btn.textContent = "↻ refresh";
     } catch (err) {
       console.error(err);
@@ -769,9 +770,6 @@ document.addEventListener("DOMContentLoaded", () => {
     if (lineChart) lineChart.resize();
     if (punchChart) punchChart.resize();
   });
-  // Lightweight polling so the dashboard stays current while open. Unchanged
-  // heat-map payloads skip the re-render (see loadHeatmap).
-  setInterval(() => {
-    withErrorState(Promise.all([loadSummary(), loadHeatmap(), loadBurn()]));
-  }, 60000);
+  // Keep charts, tables, and totals current together.
+  setInterval(loadAll, 60000);
 });

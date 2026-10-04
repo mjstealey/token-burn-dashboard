@@ -7,7 +7,9 @@ user's day, not UTC.
 
 from __future__ import annotations
 
-from typing import Any
+import datetime as dt
+from zoneinfo import ZoneInfo
+from typing import Any, Iterator
 
 from .db import Database
 from .pricing import PER_TOKEN, Pricing, pricing_key
@@ -16,17 +18,29 @@ from .pricing import PER_TOKEN, Pricing, pricing_key
 TOK = "(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens)"
 
 
-def _since(tz: str, days: int | None) -> tuple[str, list[Any]]:
-    """WHERE fragment limiting to the last `days` LOCAL calendar days (inclusive of
-    today). Snapping to local midnight — rather than a rolling now()-N cutoff —
-    keeps the earliest day in range from carrying a partial, understated total."""
+def now_utc() -> dt.datetime:
+    """Single clock boundary; tests can inject a fixed reference instant."""
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def _day_bounds(
+    tz: str, days: int, now: dt.datetime
+) -> tuple[dt.datetime, dt.datetime]:
+    zone = ZoneInfo(tz)
+    today = now.astimezone(zone).date()
+    start = dt.datetime.combine(today - dt.timedelta(days=days - 1), dt.time(), zone)
+    end = dt.datetime.combine(today + dt.timedelta(days=1), dt.time(), zone)
+    return start, end
+
+
+def _since(
+    tz: str, days: int | None, now: dt.datetime | None = None
+) -> tuple[str, list[Any]]:
+    """Local calendar days, with UTC timestamp bounds that preserve DST changes."""
     if not days or days <= 0:
         return "1=1", []
-    return (
-        "CAST(ts AT TIME ZONE ? AS DATE) >= "
-        "CAST(now() AT TIME ZONE ? AS DATE) - (CAST(? AS INTEGER) - 1)",
-        [tz, tz, days],
-    )
+    start, end = _day_bounds(tz, days, now or now_utc())
+    return "ts >= ? AND ts < ?", [start, end]
 
 
 def _filters(
@@ -34,10 +48,11 @@ def _filters(
     days: int | None,
     model: str | None = None,
     project: str | None = None,
+    now: dt.datetime | None = None,
 ) -> tuple[str, list[Any]]:
     """Range clause plus optional exact model/project filters. The UI's grouped
     views label NULLs '(unknown)'/'(none)', so those spellings match the NULLs."""
-    where, params = _since(tz, days)
+    where, params = _since(tz, days, now)
     clauses = [where]
     if model is not None:
         if model == "(unknown)":
@@ -69,24 +84,21 @@ def _window(db: Database, where: str, params: list[Any]) -> dict:
 
 
 def summary(db: Database, tz: str) -> dict:
-    today = _window(
-        db,
-        "CAST(ts AT TIME ZONE ? AS DATE) = CAST(now() AT TIME ZONE ? AS DATE)",
-        [tz, tz],
-    )
-    last_7d = _window(db, "ts >= now() - (7 * INTERVAL '1 day')", [])
-    last_30d = _window(db, "ts >= now() - (30 * INTERVAL '1 day')", [])
-    # Prior windows of the same length, so the UI can show a period-over-period delta.
-    prev_7d = _window(
-        db,
-        "ts >= now() - (14 * INTERVAL '1 day') AND ts < now() - (7 * INTERVAL '1 day')",
-        [],
-    )
-    prev_30d = _window(
-        db,
-        "ts >= now() - (60 * INTERVAL '1 day') AND ts < now() - (30 * INTERVAL '1 day')",
-        [],
-    )
+    now = now_utc()
+    start, end = _day_bounds(tz, 1, now)
+    today = _window(db, "ts >= ? AND ts < ?", [start, end])
+
+    def rolling(days: int, offset: int = 0) -> dict:
+        return _window(
+            db,
+            "ts >= ? AND ts < ?",
+            [now - dt.timedelta(days=days + offset), now - dt.timedelta(days=offset)],
+        )
+
+    last_7d = rolling(7)
+    last_30d = rolling(30)
+    prev_7d = rolling(7, 7)
+    prev_30d = rolling(30, 30)
     all_time = _window(db, "1=1", [])
 
     meta = _one(
@@ -129,7 +141,8 @@ def heatmap(
     backwards compatibility. ``model``/``project`` scope the series to one model or
     one project directory (the dashboard's click-to-filter).
     """
-    where, params = _filters(tz, days, model, project)
+    now = now_utc()
+    where, params = _filters(tz, days, model, project, now)
     rows = db.query_dicts(
         f"""
         SELECT CAST(ts AT TIME ZONE ? AS DATE) AS day, provider,
@@ -160,13 +173,25 @@ def heatmap(
         for f in _DAY_FIELDS:
             agg[f] += r[f]
 
-    combined_series = [combined[d] for d in sorted(combined)]
+    start, end = _day_bounds(tz, days, now)
+    dates = [(start.date() + dt.timedelta(days=i)).isoformat() for i in range(days)]
+
+    def fill(series: list[dict]) -> list[dict]:
+        indexed = {row["day"]: row for row in series}
+        return [
+            indexed.get(day, {"day": day, **{f: 0 for f in _DAY_FIELDS}})
+            for day in dates
+        ]
+
+    combined_series = fill(list(combined.values()))
     return {
         "metric": metric,
         "days": days,
+        "start_day": dates[0],
+        "end_day": dates[-1],
         "combined": combined_series,
-        "providers": providers,
-        "series": combined_series,  # back-compat alias
+        "providers": {provider: fill(series) for provider, series in providers.items()},
+        "series": combined_series,
     }
 
 
@@ -328,6 +353,24 @@ def export_events(
     )
 
 
+def export_event_batches(
+    db: Database,
+    tz: str,
+    days: int | None = None,
+    model: str | None = None,
+    project: str | None = None,
+    batch_size: int = 1000,
+) -> Iterator[list[dict]]:
+    """Stream one query snapshot in bounded Python batches."""
+    where, params = _filters(tz, days, model, project)
+    return db.query_batches(
+        f"SELECT {', '.join(EXPORT_COLUMNS)} FROM usage_events "
+        f"WHERE {where} ORDER BY ts, event_id",
+        params,
+        batch_size=batch_size,
+    )
+
+
 def unpriced_models(db: Database, pricing: Pricing) -> list[dict]:
     """Models with real usage whose resolved rate is all-zero — every $ figure on
     the page silently undercounts while any of these exist."""
@@ -368,9 +411,16 @@ def cache_savings(
 
 
 def burn(db: Database, tz: str, limit_5h: int | None, limit_week: int | None) -> dict:
-    block = _window(db, "ts >= now() - (5 * INTERVAL '1 hour')", [])
-    week = _window(db, "ts >= now() - (7 * INTERVAL '1 day')", [])
-    day1 = _window(db, "ts >= now() - (1 * INTERVAL '1 day')", [])
+    now = now_utc()
+
+    def trailing(hours: int) -> dict:
+        return _window(
+            db, "ts >= ? AND ts <= ?", [now - dt.timedelta(hours=hours), now]
+        )
+
+    block = trailing(5)
+    week = trailing(7 * 24)
+    day1 = trailing(24)
 
     daily_avg_tokens = (week.get("tokens") or 0) / 7.0
     daily_avg_cost = (week.get("cost") or 0) / 7.0
