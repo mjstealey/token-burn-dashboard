@@ -131,3 +131,64 @@ def test_cost_is_computed(tmp_path, db, pricing):
     cost = db.query("SELECT cost_usd FROM usage_events")[0][0]
     # 1000*5 + 500*25 + 8000*0.5 + 2000*6.25 = 5000+12500+4000+12500 = 34000 (micro-$)
     assert round(cost, 6) == round(34000 / 1_000_000, 6)
+
+
+def test_truncation_restarts_at_beginning(tmp_path, db, pricing):
+    f = tmp_path / "session.jsonl"
+    write_jsonl(f, [_assistant("old", "u1", USAGE), _assistant("old2", "u2", USAGE)])
+    assert ingest_one(db, pricing, ClaudeAdapter(), f) == 2
+    write_jsonl(f, [_assistant("new", "u3", USAGE)])
+    assert ingest_one(db, pricing, ClaudeAdapter(), f) == 1
+    assert ingest_one(db, pricing, ClaudeAdapter(), f) == 0
+
+
+def test_replacement_detected_even_with_same_size_and_mtime(tmp_path, db, pricing):
+    import os
+
+    f = tmp_path / "session.jsonl"
+    write_jsonl(f, [_assistant("old", "u1", USAGE)])
+    assert ingest_one(db, pricing, ClaudeAdapter(), f) == 1
+    original = f.stat()
+    replacement = tmp_path / "replacement.jsonl"
+    write_jsonl(replacement, [_assistant("new", "u2", USAGE)])
+    os.utime(replacement, ns=(original.st_atime_ns, original.st_mtime_ns))
+    replacement.replace(f)
+    assert f.stat().st_size == original.st_size
+    assert ingest_one(db, pricing, ClaudeAdapter(), f) == 1
+
+
+def test_events_and_watermark_rollback_together(tmp_path, db, pricing, monkeypatch):
+    import pytest
+    from token_dashboard.ingest import base
+
+    f = tmp_path / "session.jsonl"
+    write_jsonl(
+        f, [_assistant("first", "u1", USAGE), _assistant("second", "u2", USAGE)]
+    )
+    original_row = base._row
+
+    def invalid_second_row(event, pricing, source):
+        row = original_row(event, pricing, source)
+        if event.request_id == "second":
+            row[base._COLUMNS.index("output_tokens")] = "invalid integer"
+        return row
+
+    monkeypatch.setattr(base, "_row", invalid_second_row)
+    with pytest.raises(Exception, match="invalid integer"):
+        ingest_one(db, pricing, ClaudeAdapter(), f)
+    assert db.query("SELECT COUNT(*) FROM usage_events")[0][0] == 0
+    assert db.query("SELECT COUNT(*) FROM ingest_state")[0][0] == 0
+    monkeypatch.setattr(base, "_row", original_row)
+    assert ingest_one(db, pricing, ClaudeAdapter(), f) == 2
+
+
+def test_partial_line_is_retried_when_completed(tmp_path, db, pricing):
+    import json
+
+    f = tmp_path / "session.jsonl"
+    record = json.dumps(_assistant("partial", "u1", USAGE))
+    f.write_text(record[:30])
+    assert ingest_one(db, pricing, ClaudeAdapter(), f) == 0
+    with f.open("a") as stream:
+        stream.write(record[30:] + "\n")
+    assert ingest_one(db, pricing, ClaudeAdapter(), f) == 1

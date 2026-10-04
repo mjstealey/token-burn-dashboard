@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime as dt
 import threading
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +16,8 @@ from typing import Iterable
 
 from ..db import Database
 from ..pricing import Pricing, UsageBreakdown, pricing_key
+
+logger = logging.getLogger(__name__)
 
 _INGEST_LOCK = threading.Lock()
 _PRICING_HASH_KEY = "pricing_hash"
@@ -162,9 +165,11 @@ def _row(ev: UsageEvent, pricing: Pricing, source_file: str) -> list:
     ]
 
 
-def _file_state(db: Database, source_file: str) -> tuple[int, float, int] | None:
+def _file_state(
+    db: Database, source_file: str
+) -> tuple[int, float, int, str | None] | None:
     rows = db.query(
-        "SELECT last_offset, last_mtime, last_size FROM ingest_state WHERE source_file = ?",
+        "SELECT last_offset, last_mtime, last_size, file_identity FROM ingest_state WHERE source_file = ?",
         [source_file],
     )
     return rows[0] if rows else None
@@ -254,12 +259,21 @@ def ingest_one(db: Database, pricing: Pricing, adapter: Adapter, path: Path) -> 
     """Ingest a single file; returns the number of new rows inserted."""
     stat = path.stat()
     source_file = str(path)
+    identity = f"{stat.st_dev}:{stat.st_ino}"
     prev = _file_state(db, source_file)
     if prev is not None:
-        last_offset, last_mtime, last_size = prev
-        if last_size == stat.st_size and last_mtime == stat.st_mtime:
+        last_offset, last_mtime, last_size, last_identity = prev
+        same_file = last_identity == identity
+        if same_file and last_size == stat.st_size and last_mtime == stat.st_mtime:
             return 0  # unchanged — skip
-        from_offset = last_offset if adapter.incremental else 0
+        from_offset = (
+            last_offset
+            if adapter.incremental
+            and same_file
+            and stat.st_size >= last_size
+            and stat.st_size >= last_offset
+            else 0
+        )
     else:
         from_offset = 0
 
@@ -273,18 +287,32 @@ def ingest_one(db: Database, pricing: Pricing, adapter: Adapter, path: Path) -> 
     rows = [_row(ev, pricing, source_file) for ev in deduped.values()]
     now = dt.datetime.now(dt.timezone.utc)
     with db.lock:
-        before = db.con.execute("SELECT COUNT(*) FROM usage_events").fetchone()[0]
-        if rows:
-            db.con.executemany(_INSERT, rows)
-        after = db.con.execute("SELECT COUNT(*) FROM usage_events").fetchone()[0]
-        db.con.execute(
-            "INSERT INTO ingest_state (source_file, last_offset, last_mtime, last_size, rows, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (source_file) DO UPDATE SET "
-            "last_offset = excluded.last_offset, last_mtime = excluded.last_mtime, "
-            "last_size = excluded.last_size, rows = ingest_state.rows + excluded.rows, "
-            "updated_at = excluded.updated_at",
-            [source_file, new_offset, stat.st_mtime, stat.st_size, after - before, now],
-        )
+        db.con.execute("BEGIN TRANSACTION")
+        try:
+            before = db.con.execute("SELECT COUNT(*) FROM usage_events").fetchone()[0]
+            if rows:
+                db.con.executemany(_INSERT, rows)
+            after = db.con.execute("SELECT COUNT(*) FROM usage_events").fetchone()[0]
+            db.con.execute(
+                "INSERT INTO ingest_state (source_file, last_offset, last_mtime, last_size, rows, updated_at, file_identity) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (source_file) DO UPDATE SET "
+                "last_offset = excluded.last_offset, last_mtime = excluded.last_mtime, "
+                "last_size = excluded.last_size, rows = ingest_state.rows + excluded.rows, "
+                "updated_at = excluded.updated_at, file_identity = excluded.file_identity",
+                [
+                    source_file,
+                    new_offset,
+                    stat.st_mtime,
+                    stat.st_size,
+                    after - before,
+                    now,
+                    identity,
+                ],
+            )
+            db.con.execute("COMMIT")
+        except Exception:
+            db.con.execute("ROLLBACK")
+            raise
     return after - before
 
 
@@ -301,17 +329,27 @@ def ingest_all(
             files = adapter.discover(root)
             inserted = 0
             changed = 0
+            errors = []
             for path in files:
                 try:
                     n = ingest_one(db, pricing, adapter, path)
                 except Exception as exc:  # one bad file shouldn't abort the pass
-                    print(f"[ingest] {adapter.name}: failed on {path}: {exc}")
+                    logger.exception("%s: failed on %s", adapter.name, path)
+                    errors.append(
+                        {
+                            "source_file": str(path),
+                            "type": type(exc).__name__,
+                            "message": str(exc),
+                        }
+                    )
                     continue
                 if n:
                     changed += 1
                     inserted += n
             summary[adapter.name] = {
                 "files_scanned": len(files),
+                "files_failed": len(errors),
+                "errors": errors,
                 "files_with_new_rows": changed,
                 "events_inserted": inserted,
             }

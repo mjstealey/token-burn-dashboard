@@ -5,10 +5,14 @@ from __future__ import annotations
 import csv
 import datetime as dt
 import io
+import logging
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Annotated, Literal
 
-from fastapi import FastAPI, Response
+from fastapi import FastAPI, Query
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
@@ -22,6 +26,11 @@ from .ingest.registry import adapters
 from .pricing import Pricing
 from .scheduler import start_scheduler
 
+logger = logging.getLogger(__name__)
+Days = Annotated[int, Query(ge=1, le=3660)]
+OptionalDays = Annotated[int | None, Query(ge=1, le=3660)]
+Limit = Annotated[int, Query(ge=1, le=1000)]
+
 _PKG = Path(__file__).parent
 TEMPLATES = Jinja2Templates(directory=str(_PKG / "templates"))
 
@@ -29,6 +38,8 @@ TEMPLATES = Jinja2Templates(directory=str(_PKG / "templates"))
 class AppState:
     def __init__(self, cfg: Config) -> None:
         validate_timezone(cfg.timezone)
+        self.operation_lock = threading.RLock()
+        self.last_error: dict | None = None
         self.cfg = cfg
         self.db = Database(cfg.db_path)
         self.pricing = Pricing.load(cfg.pricing_path)
@@ -40,19 +51,33 @@ class AppState:
         self.last_pricing_sync: dict | None = None
 
     def ingest(self) -> dict:
-        self.sync_pricing()
-        summary = ingest_all(self.db, self.pricing, self.adapters, self.roots)
-        self.last_ingest = summary
-        self.last_ingest_at = dt.datetime.now(dt.timezone.utc)
-        return summary
-
-    def reload_pricing(self) -> None:
-        self.pricing = Pricing.load(self.cfg.pricing_path)
+        with self.operation_lock:
+            try:
+                self.sync_pricing()
+                summary = ingest_all(self.db, self.pricing, self.adapters, self.roots)
+                self.last_ingest = summary
+                self.last_ingest_at = dt.datetime.now(dt.timezone.utc)
+                self.last_error = None
+                return summary
+            except Exception as exc:
+                self.last_error = {"type": type(exc).__name__, "message": str(exc)}
+                logger.exception("Ingestion failed")
+                raise
 
     def sync_pricing(self, force: bool = False) -> dict:
-        self.reload_pricing()
-        self.last_pricing_sync = reprice_if_needed(self.db, self.pricing, force=force)
-        return self.last_pricing_sync
+        with self.operation_lock:
+            pricing = Pricing.load(self.cfg.pricing_path)
+            result = reprice_if_needed(self.db, pricing, force=force)
+            # Publish only after the database update succeeds.
+            self.pricing = pricing
+            self.last_pricing_sync = result
+            return result
+
+    def health_status(self) -> str:
+        failed = any(
+            v.get("files_failed", 0) for v in (self.last_ingest or {}).values()
+        )
+        return "degraded" if self.last_error or failed else "ok"
 
 
 def build_state(cfg: Config | None = None) -> AppState:
@@ -68,12 +93,12 @@ def create_app(state: AppState | None = None) -> FastAPI:
         try:
             state.ingest()
         except Exception as exc:  # don't block serving if a log is malformed
-            print(f"[startup] initial ingest failed: {exc}")
+            logger.warning("Initial ingest failed: %s", exc)
         scheduler = start_scheduler(state.ingest, state.cfg.ingest_interval_min)
         try:
             yield
         finally:
-            scheduler.shutdown(wait=False)
+            scheduler.shutdown(wait=True)
             state.db.close()
 
     app = FastAPI(title="Token Burn Dashboard", version="0.1.0", lifespan=lifespan)
@@ -89,7 +114,8 @@ def create_app(state: AppState | None = None) -> FastAPI:
     @app.get("/api/health")
     def health():
         return {
-            "status": "ok",
+            "status": state.health_status(),
+            "last_error": state.last_error,
             "db_path": state.cfg.db_path,
             "timezone": tz,
             "last_ingest_at": state.last_ingest_at,
@@ -105,13 +131,15 @@ def create_app(state: AppState | None = None) -> FastAPI:
         s["last_ingest"] = state.last_ingest
         s["last_pricing_sync"] = state.last_pricing_sync
         s["timezone"] = tz
+        s["status"] = state.health_status()
+        s["last_error"] = state.last_error
         s["unpriced_models"] = metrics.unpriced_models(state.db, state.pricing)
         return s
 
     @app.get("/api/heatmap")
     def api_heatmap(
-        days: int = 365,
-        metric: str = "cost",
+        days: Days = 365,
+        metric: Literal["cost", "tokens"] = "cost",
         model: str | None = None,
         project: str | None = None,
     ):
@@ -121,7 +149,7 @@ def create_app(state: AppState | None = None) -> FastAPI:
 
     @app.get("/api/punchcard")
     def api_punchcard(
-        days: int | None = None,
+        days: OptionalDays = None,
         model: str | None = None,
         project: str | None = None,
     ):
@@ -133,25 +161,33 @@ def create_app(state: AppState | None = None) -> FastAPI:
 
     @app.get("/api/export.csv")
     def api_export_csv(
-        days: int | None = None,
+        days: OptionalDays = None,
         model: str | None = None,
         project: str | None = None,
     ):
-        rows = metrics.export_events(
-            state.db, tz, days=days, model=model, project=project
-        )
-        buf = io.StringIO()
-        writer = csv.writer(buf)
-        writer.writerow(metrics.EXPORT_COLUMNS)
-        for r in rows:
-            writer.writerow(
-                [
-                    r[c].isoformat() if c == "ts" and r[c] is not None else r[c]
-                    for c in metrics.EXPORT_COLUMNS
-                ]
-            )
-        return Response(
-            content=buf.getvalue(),
+        def chunks():
+            buf = io.StringIO()
+            writer = csv.writer(buf)
+            writer.writerow(metrics.EXPORT_COLUMNS)
+            yield buf.getvalue()
+            for batch in metrics.export_event_batches(
+                state.db, tz, days=days, model=model, project=project
+            ):
+                buf.seek(0)
+                buf.truncate(0)
+                for row in batch:
+                    writer.writerow(
+                        [
+                            row[c].isoformat()
+                            if c == "ts" and row[c] is not None
+                            else row[c]
+                            for c in metrics.EXPORT_COLUMNS
+                        ]
+                    )
+                yield buf.getvalue()
+
+        return StreamingResponse(
+            chunks(),
             media_type="text/csv",
             headers={
                 "Content-Disposition": 'attachment; filename="token-burn-events.csv"'
@@ -159,7 +195,7 @@ def create_app(state: AppState | None = None) -> FastAPI:
         )
 
     @app.get("/api/models")
-    def api_models(days: int | None = None):
+    def api_models(days: OptionalDays = None):
         return {
             "models": metrics.by_model(state.db, tz, days=days),
             "cache_savings": metrics.cache_savings(
@@ -168,15 +204,15 @@ def create_app(state: AppState | None = None) -> FastAPI:
         }
 
     @app.get("/api/projects")
-    def api_projects(days: int | None = None, limit: int = 30):
+    def api_projects(days: OptionalDays = None, limit: Limit = 30):
         return {"projects": metrics.by_project(state.db, tz, days=days, limit=limit)}
 
     @app.get("/api/sessions")
-    def api_sessions(days: int | None = None, limit: int = 25):
+    def api_sessions(days: OptionalDays = None, limit: Limit = 25):
         return {"sessions": metrics.top_sessions(state.db, tz, days=days, limit=limit)}
 
     @app.get("/api/turns")
-    def api_turns(days: int | None = None, limit: int = 25):
+    def api_turns(days: OptionalDays = None, limit: Limit = 25):
         return {"turns": metrics.top_turns(state.db, tz, days=days, limit=limit)}
 
     @app.get("/api/burn")

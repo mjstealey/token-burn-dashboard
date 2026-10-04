@@ -17,7 +17,7 @@ def _insert_event(db, pricing, **kw):
         event_id=kw.get("event_id", "t:1"),
         provider="claude",
         tool="claude-code",
-        ts=dt.datetime.now(dt.timezone.utc),
+        ts=metrics.now_utc(),
     )
     ev = UsageEvent(**{**defaults, **kw})
     with db.lock:
@@ -115,7 +115,7 @@ def test_by_model_groups_both_providers(tmp_path, db, pricing):
 
 
 def test_range_scoping_uses_local_days(db, pricing):
-    now = dt.datetime.now(dt.timezone.utc)
+    now = metrics.now_utc()
     _insert_event(
         db,
         pricing,
@@ -232,7 +232,10 @@ def test_heatmap_model_filter(tmp_path, db, pricing):
     assert set(hm["providers"]) == {"claude"}
     assert sum(r["tokens"] for r in hm["combined"]) == 5500  # claude event only
     # '(unknown)' (the UI's NULL label) must match NULL models, not the literal.
-    assert metrics.heatmap(db, TZ, days=365, model="(unknown)")["combined"] == []
+    assert all(
+        r["tokens"] == 0
+        for r in metrics.heatmap(db, TZ, days=365, model="(unknown)")["combined"]
+    )
 
 
 def test_heatmap_project_filter(tmp_path, db, pricing):
@@ -266,3 +269,61 @@ def test_export_events_scoped_and_ordered(tmp_path, db, pricing):
     only_claude = metrics.export_events(db, TZ, model="claude-opus-4-8")
     assert [r["provider"] for r in only_claude] == ["claude"]
     assert metrics.export_events(db, TZ, days=1) == []  # seeded events are older
+
+
+def test_heatmap_includes_quiet_days_and_ends_today(db, pricing):
+    _insert_event(
+        db, pricing, input_tokens=70, ts=metrics.now_utc() - dt.timedelta(days=6)
+    )
+    result = metrics.heatmap(db, TZ, days=7)
+    assert result["start_day"] == "2026-06-14"
+    assert result["end_day"] == "2026-06-20"
+    assert [row["tokens"] for row in result["combined"]] == [70, 0, 0, 0, 0, 0, 0]
+    assert len(result["providers"]["claude"]) == 7
+
+
+def test_calendar_bounds_across_dst_and_local_midnight(db, pricing, monkeypatch):
+    from zoneinfo import ZoneInfo
+
+    zone = ZoneInfo(TZ)
+    for index, (local_day, expected_hours) in enumerate(
+        [
+            (dt.date(2026, 3, 8), 23),
+            (dt.date(2026, 11, 1), 25),
+        ]
+    ):
+        # 23:30 local is already the following date in UTC.
+        now = dt.datetime.combine(local_day, dt.time(23, 30), zone)
+        monkeypatch.setattr(metrics, "now_utc", lambda: now.astimezone(dt.timezone.utc))
+        start, end = metrics._day_bounds(TZ, 1, metrics.now_utc())
+        assert (
+            end.astimezone(dt.timezone.utc) - start.astimezone(dt.timezone.utc)
+        ).total_seconds() == expected_hours * 3600
+        db.execute("DELETE FROM usage_events")
+        for suffix, ts in [
+            ("before", start - dt.timedelta(microseconds=1)),
+            ("start", start),
+            ("end", end),
+        ]:
+            _insert_event(
+                db, pricing, event_id=f"{index}:{suffix}", input_tokens=10, ts=ts
+            )
+        rows = metrics.top_turns(db, TZ, days=1)
+        assert len(rows) == 1
+        assert rows[0]["ts"] == start
+        assert metrics.heatmap(db, TZ, days=1)["end_day"] == local_day.isoformat()
+
+
+def test_export_batches_keep_snapshot_during_other_queries(db, pricing):
+    for i in range(5):
+        _insert_event(db, pricing, event_id=f"batch:{i}", input_tokens=i + 1)
+    batches = metrics.export_event_batches(db, TZ, batch_size=2)
+    first = next(batches)
+    assert len(first) == 2
+    _insert_event(db, pricing, event_id="later", input_tokens=99)
+    assert db.query("SELECT COUNT(*) FROM usage_events")[0][0] == 6
+    rest = list(batches)
+    assert [len(batch) for batch in rest] == [2, 1]
+    assert {row["event_id"] for batch in [first, *rest] for row in batch} == {
+        f"batch:{i}" for i in range(5)
+    }

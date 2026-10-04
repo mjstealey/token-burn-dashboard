@@ -55,12 +55,14 @@ uv run token-dashboard serve        # ingests on boot, serves on 127.0.0.1:8080
 # or run a one-off ingest:
 uv run token-dashboard ingest
 uv run token-dashboard reprice       # reprice stored costs if pricing.yaml changed
-uv run pytest                        # run the test suite
+uv run pytest                        # Python regression tests
+node --test tests/frontend.test.cjs   # frontend regressions (Node.js 18+)
 ```
 
 `serve` binds to loopback by default (it reads your private usage logs); pass
 `--host 0.0.0.0` to expose it on the network. The Docker entrypoint does this
-inside the container.
+inside the container. Compose publishes to `127.0.0.1` on the host by default;
+set `HOST_BIND=0.0.0.0` explicitly if you want network access.
 
 ---
 
@@ -124,7 +126,13 @@ it) and then re-ingests every `TD_INGEST_INTERVAL_MIN` minutes via an in-process
 scheduler — one process owns all DuckDB writes (its single-writer model). Ingestion
 is incremental (byte-offset watermark for Claude; change-detected re-parse for Codex)
 and idempotent (`ON CONFLICT` on a stable event id), so re-runs never double-count.
-The **↻ refresh** button triggers an immediate ingest; the page also polls every 60s.
+Truncated or replaced files restart from the beginning; existing event IDs still
+deduplicate. Events and each file watermark commit together. Ingestion and
+repricing share a lock, and shutdown waits for scheduled ingestion to finish.
+The **↻ refresh** button triggers an immediate ingest; all panels poll every 60s.
+New selections cancel older requests so delayed responses cannot overwrite the
+current range or filter. Failed files appear in `/api/health` and on the dashboard;
+healthy files continue ingesting, and health reports `degraded` until recovery.
 
 ## API
 
@@ -134,13 +142,18 @@ The **↻ refresh** button triggers an immediate ingest; the page also polls eve
 `/api/turns?days=&limit=` · `/api/export.csv?days=&model=&project=` · `/api/burn` ·
 `/api/health` · `POST /api/ingest` · `POST /api/reprice?force=`.
 
-`days` limits results to the last N *local* calendar days (snapped to local
-midnight, so the earliest day is never a partial total); omit it for all time.
+`days` accepts 1–3660 and limits results to the last N *local* calendar days (snapped to local
+midnight, so the earliest day is never a partial total); omit it for all time
+except for the heatmap, which defaults to 365 days. Table `limit` accepts 1–1000;
+`metric` accepts `cost` or `tokens`. Invalid query values return HTTP 422.
 The dashboard's 30d/90d/180d/1y range toggle drives this parameter for the heat
 map **and** the models/projects/sessions/requests tables.
 
 `/api/heatmap` returns `{ metric, days, combined: [...], providers: { <provider>: [...] } }`
-(plus `series` as a back-compat alias for `combined`); each daily entry carries
+(plus `series` as a back-compat alias for `combined`, and `start_day`/`end_day`);
+series include zero-filled inactive dates and end today in the configured timezone.
+The trend uses seven calendar days, leaving its first six averages blank until
+there is a complete window. Each daily entry carries
 `cost`, `tokens`, and the `input`/`output`/`cache_read`/`cache_creation` breakdown.
 `/api/models` also returns `cache_savings` (notional $ saved by prompt caching over
 the same window), and `/api/summary` and `/api/health` list `unpriced_models` —
@@ -152,7 +165,8 @@ model or project directory — in the UI, click a row in the **Models** or
 `/api/punchcard` returns local weekday × hour totals (`dow` 0=Sunday), rendered as
 the **Rhythm** card — *when* the burn happens. `/api/export.csv` streams the raw
 usage events (one row per request, all token classes + cost) for downstream
-analysis; the **⬇ csv** button downloads the current range and filter.
+analysis, fetched and serialized in batches from one query snapshot; the
+**⬇ csv** button downloads the current range and filter.
 
 ---
 

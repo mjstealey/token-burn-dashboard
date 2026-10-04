@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import duckdb
 
@@ -52,6 +52,8 @@ CREATE TABLE IF NOT EXISTS ingest_state (
     updated_at  TIMESTAMPTZ
 );
 
+ALTER TABLE ingest_state ADD COLUMN IF NOT EXISTS file_identity VARCHAR;
+
 CREATE TABLE IF NOT EXISTS app_metadata (
     key        VARCHAR PRIMARY KEY,
     value      VARCHAR,
@@ -91,6 +93,32 @@ class Database:
             cur = self._con.execute(sql, params or [])
             cols = [d[0] for d in cur.description]
             return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    def query_batches(
+        self, sql: str, params: list[Any] | None = None, batch_size: int = 1000
+    ) -> Iterator[list[dict[str, Any]]]:
+        """Use a separate cursor so concurrent queries cannot replace this result.
+
+        The SELECT sees a consistent snapshot; only each fetch holds the shared
+        lock, never the time spent transmitting a batch to a slow client.
+        """
+        if batch_size < 1:
+            raise ValueError("batch_size must be positive")
+        with self._lock:
+            cursor = self._con.cursor()
+        try:
+            with self._lock:
+                cursor.execute(sql, params or [])
+                columns = [d[0] for d in cursor.description]
+            while True:
+                with self._lock:
+                    rows = cursor.fetchmany(batch_size)
+                if not rows:
+                    break
+                yield [dict(zip(columns, row)) for row in rows]
+        finally:
+            with self._lock:
+                cursor.close()
 
     def execute(self, sql: str, params: list[Any] | None = None) -> None:
         with self._lock:

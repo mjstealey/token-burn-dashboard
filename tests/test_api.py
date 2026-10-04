@@ -89,7 +89,10 @@ def test_endpoints_serve(tmp_path):
             "claude"
             in client.get("/api/heatmap?model=claude-opus-4-8").json()["providers"]
         )
-        assert client.get("/api/heatmap?model=nope").json()["combined"] == []
+        assert all(
+            row["tokens"] == 0
+            for row in client.get("/api/heatmap?model=nope").json()["combined"]
+        )
         assert "claude" in client.get("/api/heatmap?project=/proj").json()["providers"]
 
         # CSV export: header + the seeded event; range/filter params scope it.
@@ -104,3 +107,37 @@ def test_endpoints_serve(tmp_path):
         assert (
             len(client.get("/api/export.csv?model=nope").text.strip().splitlines()) == 1
         )
+
+
+def test_invalid_query_parameters_return_422(tmp_path):
+    with TestClient(_isolated_app(tmp_path)) as client:
+        for path in [
+            "/api/heatmap?days=0",
+            "/api/heatmap?days=3661",
+            "/api/heatmap?metric=invalid",
+            "/api/models?days=-1",
+            "/api/projects?limit=0",
+            "/api/sessions?limit=1001",
+            "/api/turns?limit=-2",
+            "/api/export.csv?days=-1",
+            "/api/punchcard?days=9999999999",
+        ]:
+            assert client.get(path).status_code == 422, path
+
+
+def test_failed_file_reported_without_losing_healthy_files(tmp_path):
+    app = _isolated_app(tmp_path)
+    write_jsonl(
+        tmp_path / "claude" / "bad.jsonl",
+        [{"type": "assistant", "message": {"usage": {"input_tokens": "bad"}}}],
+    )
+    with TestClient(app) as client:
+        health = client.get("/api/health").json()
+        assert health["status"] == "degraded"
+        report = health["last_ingest"]["claude"]
+        assert report["files_failed"] == 1
+        assert report["events_inserted"] == 1
+        assert report["errors"][0]["type"] == "ValueError"
+        (tmp_path / "claude" / "bad.jsonl").unlink()
+        assert client.post("/api/ingest").status_code == 200
+        assert client.get("/api/health").json()["status"] == "ok"
