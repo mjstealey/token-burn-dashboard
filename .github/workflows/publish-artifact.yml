@@ -12,7 +12,7 @@ jobs:
       - name: Publish ${{ github.event.release.tag_name }}
         env:
           AMGR_URL: "https://alpha-1.fabric-testbed.net"
-          ARTIFACT_UUID: "c8b6f0b8-3fac-4dcf-a44d-288012ef10d5"
+          ARTIFACT_UUID: "0aaefb8f-ff78-4907-9e26-add820fc518c"
           TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
