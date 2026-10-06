@@ -1,0 +1,44 @@
+name: AMGR publish negative checks (temporary)
+# Temporary: exercises the refusal paths of the FABRIC Artifact Manager
+# GitHub Actions publish endpoint on alpha-1. Each step only reports the
+# HTTP status it received; nothing here fails the job.
+on:
+  push:
+    branches: [test/amgr-negative-checks, main]
+    paths: ['.github/workflows/amgr-negative-checks.yml']
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/amgr-negative-checks.yml']
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    env:
+      AMGR_URL: "https://alpha-1.fabric-testbed.net"
+      ARTIFACT_UUID: "0aaefb8f-ff78-4907-9e26-add820fc518c"
+      TAG: "v1.2.0"
+    steps:
+      - name: Publish attempts
+        run: |
+          set -uo pipefail
+          attempt() {
+            label="$1"; audience="$2"
+            token=$(curl -sS --get --data-urlencode "audience=$audience" \
+              -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL" | jq -r .value)
+            status=$(curl -sS -o body.json -w '%{http_code}' -X POST \
+              "${AMGR_URL%/}/api/artifacts/$ARTIFACT_UUID/repo/publish" \
+              -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+              --data "$(jq -cn --arg tag "$TAG" '{tag: $tag}')")
+            detail=$(jq -r '.detail // "version returned"' body.json 2>/dev/null || echo "non-JSON body")
+            echo "::notice title=$label::event=$GITHUB_EVENT_NAME repo=$GITHUB_REPOSITORY http=$status detail=$detail"
+            echo "| $label | $GITHUB_EVENT_NAME | $GITHUB_REPOSITORY | $status | $detail |" >> "$GITHUB_STEP_SUMMARY"
+          }
+          {
+            echo "| Check | Event | Repo | HTTP | Detail |"
+            echo "|---|---|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          attempt "correct audience" "$AMGR_URL"
+          attempt "wrong audience" "https://wrong-audience.example"
